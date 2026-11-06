@@ -38,6 +38,8 @@ export interface Project {
   files: ProjectFile[]
   artifacts: MarkdownFile[]
   handle?: FileSystemDirectoryHandle
+  /** 扫描时拿到的文件句柄，读取时直接复用，不再按名称重新查找 */
+  fileHandles?: Map<string, FileSystemFileHandle>
   /** 只读模式下按路径保存选中的文件 */
   snapshot?: Map<string, File>
 }
@@ -50,7 +52,7 @@ const byPath = (a: { path: string }, b: { path: string }) => a.path.localeCompar
 
 // ---------------------------------------------------------------- 扫描
 
-interface ScannedFile { path: string; size: number }
+interface ScannedFile { path: string; size: number; handle?: FileSystemFileHandle }
 
 /** 同时识别带版本号的新产物和原有的无后缀 Markdown。 */
 function indexFiles(entries: ScannedFile[]) {
@@ -71,7 +73,9 @@ function indexFiles(entries: ScannedFile[]) {
   }).sort(byPath)
   const converted = new Set(artifacts.map((artifact) => artifact.pdfPath))
   const files = pdfs.map((file) => ({ ...file, converted: converted.has(file.path) })).sort(byPath)
-  return { files, artifacts }
+  const fileHandles = new Map<string, FileSystemFileHandle>()
+  for (const entry of entries) if (entry.handle) fileHandles.set(entry.path, entry.handle)
+  return { files, artifacts, fileHandles }
 }
 
 async function scanHandle(dir: DirHandle, prefix = "", depth = 0): Promise<ScannedFile[]> {
@@ -79,7 +83,8 @@ async function scanHandle(dir: DirHandle, prefix = "", depth = 0): Promise<Scann
   const nested: Promise<ScannedFile[]>[] = []
   for await (const entry of dir.values()) {
     if (entry.kind === "file" && /\.(pdf|md)$/i.test(entry.name)) {
-      files.push({ path: prefix + entry.name, size: (await entry.getFile()).size })
+      const handle = entry as FileSystemFileHandle
+      files.push({ path: prefix + entry.name, size: (await handle.getFile()).size, handle })
     } else if (entry.kind === "directory" && depth < MAX_DEPTH && !SKIP_DIR.test(entry.name)) {
       nested.push(scanHandle(entry as DirHandle, `${prefix}${entry.name}/`, depth + 1))
     }
@@ -107,6 +112,16 @@ export function nextMarkdownFile(pdfPath: string, artifacts: MarkdownFile[]): Ma
   return { path: mdName(pdfPath, version), pdfPath, version }
 }
 
+/** `crypto.randomUUID` 仅在安全上下文（HTTPS / localhost）可用，通过局域网 IP 的 HTTP 访问时需兜底。 */
+function newId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID()
+  const b = crypto.getRandomValues(new Uint8Array(16))
+  b[6] = (b[6] & 0x0f) | 0x40
+  b[8] = (b[8] & 0x3f) | 0x80
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
 // ---------------------------------------------------------------- 打开
 
 async function ensurePermission(handle: FileSystemDirectoryHandle, ask: boolean) {
@@ -129,7 +144,7 @@ export async function pickDirectory(): Promise<Project | null> {
     // 同一目录再次选择时复用原记录
     let id: string | null = null
     for (const r of recents) if (await r.handle.isSameEntry(handle)) id = r.id
-    const project = await fromHandle(handle, id ?? crypto.randomUUID())
+    const project = await fromHandle(handle, id ?? newId())
     await remember(project)
     return project
   } catch (e) {
@@ -139,11 +154,11 @@ export async function pickDirectory(): Promise<Project | null> {
 }
 
 /** 只读兜底：`<input webkitdirectory>` 选到的文件列表。 */
-export function fromFileList(list: FileList): Project | null {
+export function fromFileList(list: FileList | File[]): Project | null {
   const files = Array.from(list)
   if (!files.length) return null
   const name = files[0].webkitRelativePath.split("/")[0] || "未命名目录"
-  return { id: crypto.randomUUID(), name, writable: false, ...scanSnapshot(files) }
+  return { id: newId(), name, writable: false, ...scanSnapshot(files) }
 }
 
 /** 重新打开最近项目；浏览器会在需要时再次请求授权。 */
@@ -168,14 +183,35 @@ async function walk(project: Project, path: string) {
   return { dir, name: parts[parts.length - 1] }
 }
 
+/** 通过枚举目录查找子文件，避开个别文件名被 getFileHandle 拒绝的情况。 */
+async function findFile(dir: FileSystemDirectoryHandle, name: string) {
+  for await (const entry of (dir as DirHandle).values()) {
+    if (entry.kind === "file" && entry.name === name) return entry as FileSystemFileHandle
+  }
+  return null
+}
+
 async function readProjectFile(project: Project, path: string): Promise<File> {
   if (project.snapshot) {
     const f = project.snapshot.get(path)
     if (!f) throw new Error(`找不到 ${path}`)
     return f
   }
+  // 授权可能已被浏览器收回（例如切到后台一段时间、重新打开页面），读取前先确认，必要时重新请求。
+  if (!(await ensurePermission(project.handle!, true))) {
+    throw new Error(`没有获得「${project.name}」的访问授权，请在浏览器弹出的提示中允许访问该目录`)
+  }
+  const cached = project.fileHandles?.get(path)
+  if (cached) {
+    try {
+      return await cached.getFile()
+    } catch {
+      // 文件可能已被移动或替换，退回按路径查找
+    }
+  }
   const { dir, name } = await walk(project, path)
-  return (await dir.getFileHandle(name)).getFile()
+  const handle = (await findFile(dir, name)) ?? (await dir.getFileHandle(name))
+  return handle.getFile()
 }
 
 export const readPdf = readProjectFile

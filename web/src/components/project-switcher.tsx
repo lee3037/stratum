@@ -63,9 +63,9 @@ export function ProjectSwitcher({ project, onSwitch }: ProjectSwitcherProps) {
         className="hidden"
         multiple
         onChange={(e) => {
-          const p = e.target.files && fromFileList(e.target.files)
+          const files = e.target.files ? Array.from(e.target.files) : []
           e.target.value = ""
-          if (p) onSwitch(async () => p)
+          if (files.length) onSwitch(async () => fromFileList(files))
         }}
         ref={(el) => {
           folderRef.current = el

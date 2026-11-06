@@ -109,9 +109,9 @@ export function ProjectPicker({ onOpen }: { onOpen: (p: Project) => void }) {
         className="hidden"
         multiple
         onChange={(e) => {
-          const p = e.target.files && fromFileList(e.target.files)
+          const files = e.target.files ? Array.from(e.target.files) : []
           e.target.value = ""
-          if (p) onOpen(p)
+          if (files.length) run(async () => fromFileList(files))
         }}
         ref={(el) => {
           folderRef.current = el

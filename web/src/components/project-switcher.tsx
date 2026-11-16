@@ -1,9 +1,8 @@
-import { useRef, useState } from "react"
-import { Check, ChevronsUpDown, FolderOpen, FolderPlus } from "lucide-react"
+import { useState } from "react"
+import { Check, ChevronsUpDown, Library, LibraryBig } from "lucide-react"
 
-import type { Project, RecentProject } from "@/lib/project"
-import { canWriteBack, fromFileList, loadRecents, openRecent, pickDirectory } from "@/lib/project"
-import { Badge } from "@/components/ui/badge"
+import type { KbSummary, Project } from "@/lib/library"
+import { listKbs } from "@/lib/library"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -15,64 +14,38 @@ import {
 
 interface ProjectSwitcherProps {
   project: Project
-  /** 打开另一个项目；task 返回 null 表示用户取消了目录选择 */
-  onSwitch: (task: () => Promise<Project | null>) => void
+  /** 切换到另一个知识库；null 回到知识库列表 */
+  onSwitch: (name: string | null) => void
 }
 
-/** 页头的项目名：下拉列出最近项目，点选即切换，不经过首页。 */
+/** 页头的知识库名：下拉列出全部知识库，点选即切换。 */
 export function ProjectSwitcher({ project, onSwitch }: ProjectSwitcherProps) {
-  const [recents, setRecents] = useState<RecentProject[]>([])
-  const folderRef = useRef<HTMLInputElement>(null)
-
-  const openOther = () => {
-    if (canWriteBack()) onSwitch(pickDirectory)
-    else folderRef.current?.click()
-  }
+  const [kbs, setKbs] = useState<KbSummary[]>([])
 
   return (
-    <>
-      <DropdownMenu onOpenChange={(open) => open && loadRecents().then(setRecents)}>
-        <DropdownMenuTrigger render={<Button className="max-w-56 gap-2 px-2" variant="ghost" />}>
-          <FolderOpen />
-          <span className="truncate">{project.name}</span>
-          {!project.writable && <Badge variant="outline">只读</Badge>}
-          <ChevronsUpDown className="text-muted-foreground" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent className="w-64">
-          {recents.map((r) => {
-            const current = r.id === project.id
-            return (
-              <DropdownMenuItem
-                key={r.id}
-                onClick={() => !current && onSwitch(() => openRecent(r))}
-              >
-                <FolderOpen className="text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{r.name}</span>
-                {current && <Check />}
-              </DropdownMenuItem>
-            )
-          })}
-          {recents.length > 0 && <DropdownMenuSeparator />}
-          <DropdownMenuItem onClick={openOther}>
-            <FolderPlus className="text-muted-foreground" />
-            打开其他目录…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <input
-        className="hidden"
-        multiple
-        onChange={(e) => {
-          const files = e.target.files ? Array.from(e.target.files) : []
-          e.target.value = ""
-          if (files.length) onSwitch(async () => fromFileList(files))
-        }}
-        ref={(el) => {
-          folderRef.current = el
-          el?.setAttribute("webkitdirectory", "")
-        }}
-        type="file"
-      />
-    </>
+    <DropdownMenu onOpenChange={(open) => open && listKbs().then((r) => setKbs(r.kbs), () => setKbs([]))}>
+      <DropdownMenuTrigger render={<Button className="max-w-56 gap-2 px-2" variant="ghost" />}>
+        <Library />
+        <span className="truncate">{project.name}</span>
+        <ChevronsUpDown className="text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="max-h-[60svh] w-64 overflow-y-auto">
+        {kbs.map((kb) => {
+          const current = kb.name === project.name
+          return (
+            <DropdownMenuItem key={kb.name} onClick={() => !current && onSwitch(kb.name)}>
+              <Library className="text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{kb.name}</span>
+              {current ? <Check /> : <span className="text-xs text-muted-foreground tabular-nums">{kb.pdfs}</span>}
+            </DropdownMenuItem>
+          )
+        })}
+        {kbs.length > 0 && <DropdownMenuSeparator />}
+        <DropdownMenuItem onClick={() => onSwitch(null)}>
+          <LibraryBig className="text-muted-foreground" />
+          全部知识库 / 新建…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

@@ -1,4 +1,4 @@
-import type { MarkdownFile, Project } from "@/lib/project"
+import type { MarkdownFile, Project } from "@/lib/library"
 import { MarkdownIcon } from "@/components/file-type-icon"
 import { TreeNav } from "@/components/spectrumui/tree-nav"
 
@@ -14,7 +14,7 @@ interface ArtifactNavProps {
   onSelect: (path: string) => void
 }
 
-/** 合并目录中的产物与本次会话生成的版本，按实际 Markdown 路径导航。 */
+/** 合并知识库中已保存的版本与本次会话生成的版本，按实际 Markdown 路径导航。 */
 export function ArtifactNav({ project, artifacts, currentPath, locked, onSelect }: ArtifactNavProps) {
   const byPath = new Map<string, ArtifactNavItem>(project.artifacts.map((file) => [file.path, file]))
   for (const artifact of artifacts) byPath.set(artifact.path, artifact)

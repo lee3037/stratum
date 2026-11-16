@@ -8,7 +8,6 @@ import { toast } from "@/components/toaster"
 
 interface ResultActionsProps {
   markdown: string
-  writable: boolean
   busy: boolean
   saveState: MorphButtonState
   onDownload: () => void
@@ -16,10 +15,10 @@ interface ResultActionsProps {
   onReparse: () => void
 }
 
-const SAVE_LABELS = { idle: "保存到目录", loading: "保存中", success: "已保存", error: "保存失败" }
+const SAVE_LABELS = { idle: "保存到知识库", loading: "保存中", success: "已保存", error: "保存失败" }
 const SAVE_ICONS = { idle: Save, loading: LoaderCircle, success: Check, error: X }
 
-export function ResultActions({ markdown, writable, busy, saveState, onDownload, onSave, onReparse }: ResultActionsProps) {
+export function ResultActions({ markdown, busy, saveState, onDownload, onSave, onReparse }: ResultActionsProps) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
@@ -35,11 +34,11 @@ export function ResultActions({ markdown, writable, busy, saveState, onDownload,
   const items: ExpandableActionBarItem[] = [
     { id: "copy", label: copied ? "已复制" : "复制 Markdown", icon: copied ? <Check /> : <Copy />, disabled: busy, onClick: copy },
     { id: "download", label: "下载 .md", icon: <Download />, disabled: busy, onClick: onDownload },
-    ...(writable ? [{
+    {
       id: "save", label: SAVE_LABELS[saveState],
       icon: <SaveIcon className={saveState === "loading" ? "animate-spin" : undefined} />,
       disabled: busy || saveState !== "idle", onClick: onSave,
-    }] : []),
+    },
     { id: "reparse", label: busy ? "处理中" : "重新解析分块", icon: <RotateCcw className={busy ? "animate-spin" : undefined} />, disabled: busy || saveState === "loading", onClick: onReparse },
   ]
 

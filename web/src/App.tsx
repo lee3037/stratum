@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Upload } from "lucide-react"
+import { LoaderCircle, Send, Upload } from "lucide-react"
 
 import type { ChunkOptions, ConvertOptions, ParserInfo } from "@/lib/api"
-import { createJob, DEFAULT_CHUNK, DEFAULT_CONVERT, getJob, rechunk } from "@/lib/api"
-import type { MarkdownFile, Project } from "@/lib/project"
-import { addPdfToProject, nextMarkdownFile, readMarkdown, readPdf, rescan, writeMarkdown } from "@/lib/project"
+import { DEFAULT_CHUNK, DEFAULT_CONVERT, getJob, rechunk } from "@/lib/api"
+import type { MarkdownFile, Project, UploadItem } from "@/lib/library"
+import {
+  createBatch, getSettings, importToFastgpt, itemsFromDrop, nextMarkdownFile, openKb, overwriteMarkdown, pdfUrl, readMarkdown, rescan,
+  saveVersion, startKbJob, summarizeUpload, uploadFiles,
+} from "@/lib/library"
 import { loadSeparators } from "@/lib/separators"
 import { useParsers } from "@/lib/use-parsers"
-import { useStored } from "@/lib/use-stored"
+import { Button } from "@/components/ui/button"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { Hint } from "@/components/hint"
 import type { MorphButtonState } from "@/components/spectrumui/morph-button"
 import { toast, Toaster } from "@/components/toaster"
 import { FileDrawer, type FileDrawerView, type ParseSettings } from "@/components/file-drawer"
-import { ProjectPicker } from "@/components/project-picker"
+import { BatchStage } from "@/components/batch-stage"
+import { KbPicker } from "@/components/kb-picker"
+import { KbSettingsDrawer } from "@/components/kb-settings-drawer"
 import type { Pending } from "@/components/stage"
 import { Workspace, type Doc, type Preview } from "@/components/workspace"
 
@@ -34,14 +40,49 @@ interface Artifact extends MarkdownFile {
   chunk: ChunkOptions
   unsaved: boolean
   saved: boolean
+  /** 已保存版本在服务器上的标识；保存修改时用于检测是否被其他人改过 */
+  etag?: string
 }
 
-const isPdf = (f: File) => /\.pdf$/i.test(f.name) || f.type === "application/pdf"
+export interface Uploading {
+  loaded: number
+  total: number
+}
+
+const LAST_KB = "stratum.kb"
+const REFRESH_MS = 15000
+
+function kbFromUrl(): string | null {
+  return new URLSearchParams(window.location.search).get("kb")
+}
+
+/** 地址栏带上知识库名称，方便收藏或发给同事直接打开。 */
+function rememberKb(name: string | null) {
+  const url = new URL(window.location.href)
+  if (name) url.searchParams.set("kb", name)
+  else url.searchParams.delete("kb")
+  window.history.replaceState(null, "", url)
+  try {
+    if (name) localStorage.setItem(LAST_KB, name)
+    else localStorage.removeItem(LAST_KB)
+  } catch { /* 存储不可用时只是不记住 */ }
+}
+
+const baseName = (path: string) => path.split("/").pop() ?? path
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null)
-  const [convertOpts, setConvertOpts] = useStored("stratum.convert", DEFAULT_CONVERT)
-  const [draft, setDraft] = useStored("stratum.chunk", DEFAULT_CHUNK)
+  // 启动时直接进入地址栏或上次打开的知识库
+  const [initialKb] = useState(() => {
+    try {
+      return kbFromUrl() ?? localStorage.getItem(LAST_KB)
+    } catch {
+      return kbFromUrl()
+    }
+  })
+  const [booting, setBooting] = useState(!!initialKb)
+  const [convertOpts, setConvertOpts] = useState<ConvertOptions>(DEFAULT_CONVERT)
+  const [draft, setDraft] = useState<ChunkOptions>(DEFAULT_CHUNK)
   const catalog = useParsers()
   const [pending, setPending] = useState<Pending | null>(null)
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
@@ -53,13 +94,23 @@ export default function App() {
   const applied = current?.chunk ?? draft
   const unsaved = artifacts.some((artifact) => artifact.unsaved)
   const [busy, setBusy] = useState(false)
+  const [uploading, setUploading] = useState<Uploading | null>(null)
   const [saveState, setSaveState] = useState<MorphButtonState>("idle")
   const [dragging, setDragging] = useState(false)
   const [preview, setPreview] = useState<Preview | null>(null)
   // seq 每次打开递增，用作 key：关闭时保留内容播放收起动画，再次打开时重置抽屉内状态
-  const [drawer, setDrawer] = useState<{ path: string; view: FileDrawerView; reparse: boolean; open: boolean; seq: number } | null>(null)
+  const [drawer, setDrawer] = useState<{
+    path: string; view: FileDrawerView; reparse: boolean; open: boolean; seq: number
+    /** 批量解析：确认配置后提交这些文件 */
+    batch?: { paths: string[]; skipConverted: boolean }
+  } | null>(null)
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSeq, setSettingsSeq] = useState(0)
+  const [importing, setImporting] = useState(false)
+  const [latestBatch, setLatestBatch] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
-  const runRef = useRef(0) // 每次转换或离开项目递增，过期的轮询自行停止
+  const runRef = useRef(0) // 每次转换或离开知识库递增，过期的轮询自行停止
   const overwriteOk = useRef<string | null>(null) // 已确认可保存修改的产物路径
 
   const updateCurrent = useCallback((changes: Partial<Artifact>) => {
@@ -71,6 +122,7 @@ export default function App() {
     setActiveArtifact(artifact.path)
     setSaveState("idle")
     setPreview(null)
+    setBatchOpen(false)
   }, [])
 
   // 每次生成独立版本。旧版本的文本、编辑和配置均留在会话中。
@@ -80,8 +132,8 @@ export default function App() {
     settings: ParseSettings,
   ) => {
     if (!project) return
-    const scanned = await rescan(project)
-    const output = nextMarkdownFile(source.path ?? source.file.name, [...scanned.artifacts, ...artifacts])
+    const scanned = await rescan(project).catch(() => project)
+    const output = nextMarkdownFile(source.path, [...scanned.artifacts, ...artifacts])
     setProject(scanned)
     showArtifact({
       ...output, doc: { ...source, mdPath: output.path }, markdown: text,
@@ -89,18 +141,63 @@ export default function App() {
     })
   }, [project, artifacts, showArtifact])
 
+  // ---------------------------------------------------------------- 知识库
+
+  const openProject = useCallback(async (name: string) => {
+    const [next, settings] = await Promise.all([openKb(name), getSettings(name)])
+    setConvertOpts({ ...DEFAULT_CONVERT, ...settings.convert })
+    setDraft({ ...DEFAULT_CHUNK, ...settings.chunk })
+    setProject(next)
+    rememberKb(next.name)
+  }, [])
+
+  useEffect(() => {
+    if (!initialKb) return
+    openProject(initialKb)
+      .catch(() => rememberKb(null))
+      .finally(() => setBooting(false))
+  }, [initialKb, openProject])
+
+  // 其他人可能同时在上传或保存：定时刷新文件列表，切回页面时立即刷新
+  useEffect(() => {
+    if (!project) return
+    let stopped = false
+    const refresh = async () => {
+      if (document.visibilityState !== "visible") return
+      try {
+        const next = await rescan(project)
+        if (!stopped) {
+          setProject((p) => p && p.name === next.name && JSON.stringify(p) !== JSON.stringify(next) ? next : p)
+        }
+      } catch { /* 偶发网络错误等下一轮 */ }
+    }
+    const timer = window.setInterval(refresh, REFRESH_MS)
+    const onVisible = () => void refresh()
+    document.addEventListener("visibilitychange", onVisible)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+      document.removeEventListener("visibilitychange", onVisible)
+    }
+  }, [project])
+
+
   // ---------------------------------------------------------------- 转换
 
   const convert = useCallback(
-    async (file: File, path?: string, settings: ParseSettings = { convert: convertOpts, chunk: draft }) => {
+    async (path: string, settings: ParseSettings = { convert: convertOpts, chunk: draft }) => {
+      if (!project) return
       const run = ++runRef.current
       const opts = { ...settings.convert, ...settings.chunk }
+      const size = project.files.find((f) => f.path === path)?.size ?? 0
+      const base = { name: baseName(path), size, path }
       setPreview(null)
-      setPending({ file, path, done: 0, total: 0 })
+      setBatchOpen(false)
+      setPending({ ...base, done: 0, total: 0 })
       try {
-        const { id, page_count } = await createJob(file, opts)
+        const { id, page_count } = await startKbJob(project.name, path, opts)
         if (run !== runRef.current) return
-        setPending({ file, path, done: 0, total: page_count })
+        setPending({ ...base, done: 0, total: page_count })
         const tick = async () => {
           try {
             const job = await getJob(id)
@@ -108,16 +205,16 @@ export default function App() {
             if (job.status === "done" && job.result) {
               // 后端可以瞬间完成；让进度组件补完各阶段和逐页计数，再切换到结果。
               await new Promise<void>((resolve) => {
-                setPending({ file, path, done: page_count, total: page_count, onComplete: resolve })
+                setPending({ ...base, done: page_count, total: page_count, onComplete: resolve })
               })
               if (run !== runRef.current) return
-              await publishResult({ jobId: id, file, path, result: job.result }, job.result.markdown, settings)
+              await publishResult({ jobId: id, path, result: job.result }, job.result.markdown, settings)
               setPending(null)
               job.result.warnings.forEach((w) => toast({ title: w, status: "info", duration: 8000 }))
               return
             }
             if (job.status === "error") throw new Error(job.error || "转换失败")
-            setPending({ file, path, done: job.progress.done, total: job.progress.total })
+            setPending({ ...base, done: job.progress.done, total: job.progress.total })
             pollRef.current = window.setTimeout(tick, 700)
           } catch (e) {
             if (run !== runRef.current) return
@@ -128,41 +225,40 @@ export default function App() {
         tick()
       } catch (e) {
         if (run !== runRef.current) return
-        fail("上传失败", e)
+        fail("提交解析失败", e)
         setPending(null)
       }
     },
-    [convertOpts, draft, publishResult]
+    [project, convertOpts, draft, publishResult]
   )
 
-  const openFile = useCallback(
-    (file: File, path?: string) => {
-      if (pending || busy || saveState === "loading") return
-      if (!isPdf(file)) {
-        toast({ title: "请选择 PDF 文件", status: "error" })
-        return
-      }
-      convert(file, path)
-    },
-    [pending, busy, saveState, convert]
-  )
-
-  const addPdf = async (file: File) => {
-    if (!project || pending || busy || saveState === "loading") return
-    if (!isPdf(file)) {
-      toast({ title: "请选择 PDF 文件", status: "error" })
+  /** 上传到当前知识库；autoParse 时，只上传了一个 PDF 就直接用默认参数解析它。 */
+  const upload = useCallback(async (items: UploadItem[], autoParse = false) => {
+    if (!project || uploading) return
+    if (!items.length) {
+      toast({ title: "没有找到 PDF 文件", status: "error" })
       return
     }
-    setBusy(true)
+    setUploading({ loaded: 0, total: items.reduce((n, it) => n + it.file.size, 0) })
     try {
-      setProject(await addPdfToProject(project, file))
-      toast({ title: `已添加 ${file.name}`, status: "success" })
+      const results = await uploadFiles(project.name, items, (loaded, total) => setUploading({ loaded, total }))
+      const failed = results.filter((r) => r.status === "error")
+      toast({
+        title: `上传完成：${summarizeUpload(results)}`,
+        description: failed.slice(0, 3).map((r) => `${r.path}：${r.message}`).join("\n") || undefined,
+        status: failed.length ? "error" : "success",
+        duration: failed.length ? 10000 : 4000,
+      })
+      results.filter((r) => r.status === "renamed").forEach((r) => toast({ title: r.message ?? r.path, status: "info" }))
+      setProject(await rescan(project))
+      const ok = results.filter((r) => r.status !== "error")
+      if (autoParse && items.length === 1 && ok.length === 1 && !pending && !busy) void convert(ok[0].path)
     } catch (e) {
-      fail("添加 PDF 失败", e)
+      fail("上传失败", e)
     } finally {
-      setBusy(false)
+      setUploading(null)
     }
-  }
+  }, [project, uploading, pending, busy, convert])
 
   // ---------------------------------------------------------------- 侧栏点选：抽屉 → 解析或预览
 
@@ -172,6 +268,7 @@ export default function App() {
 
   const selectPath = (path: string) => {
     if (!project || pending || busy || saveState === "loading") return
+    setBatchOpen(false)
     const latest = [...project.artifacts, ...artifacts]
       .filter((artifact) => artifact.pdfPath === path)
       .sort((a, b) => b.version - a.version)[0]
@@ -187,33 +284,18 @@ export default function App() {
     openDrawer(path, "menu")
   }
 
-  // 抽屉里确认的配置写回设置，并用它解析
-  const parse = async (path: string, settings: ParseSettings) => {
-    if (!project) return
+  // 抽屉里确认的配置写回知识库默认参数，并用它解析
+  const parse = (path: string, settings: ParseSettings) => {
     closeDrawer()
-    try {
-      const file = await readPdf(project, path)
-      setConvertOpts(settings.convert)
-      setDraft(settings.chunk)
-      convert(file, path, settings)
-    } catch (e) {
-      fail("无法读取文件", e)
-    }
+    void convert(path, settings)
   }
 
-  const previewPath = async (path: string) => {
+  const previewPath = (path: string) => {
     if (!project) return
     closeDrawer()
-    try {
-      const file = await readPdf(project, path)
-      setPreview({ path, url: URL.createObjectURL(file) })
-    } catch (e) {
-      fail("无法读取文件", e)
-    }
+    setBatchOpen(false)
+    setPreview({ path, url: pdfUrl(project.name, path) })
   }
-
-  // 预览换掉或关闭时释放上一个 blob URL
-  useEffect(() => () => void (preview && URL.revokeObjectURL(preview.url)), [preview])
 
   const selectArtifact = async (path: string) => {
     if (!project || pending || busy || saveState === "loading") return
@@ -221,20 +303,23 @@ export default function App() {
       setActiveArtifact(path)
       setSaveState("idle")
       setPreview(null)
+      setBatchOpen(false)
       return
     }
     const output = project.artifacts.find((artifact) => artifact.path === path)
     if (!output) return
     setBusy(true)
     try {
-      const [file, text] = await Promise.all([readPdf(project, output.pdfPath), readMarkdown(project, path)])
+      const { markdown: text, etag, meta } = await readMarkdown(project.name, path)
       const lines = new Set(text.split(/\r?\n/))
-      const separator = [draft.separator, ...loadSeparators()].find((s) => lines.has(s)) ?? draft.separator
+      // 优先用保存时记录的分隔符；手动编辑过或旧文件没有记录时按内容识别
+      const separator = [meta.chunk?.separator, draft.separator, ...loadSeparators()]
+        .find((s): s is string => !!s && lines.has(s)) ?? meta.chunk?.separator ?? draft.separator
       showArtifact({
         ...output,
-        doc: { jobId: null, file, path: output.pdfPath, mdPath: path, result: null },
-        markdown: text, convert: null, chunk: { ...draft, separator },
-        unsaved: false, saved: true,
+        doc: { jobId: null, path: output.pdfPath, mdPath: path, result: null },
+        markdown: text, convert: meta.convert ?? null, chunk: { ...draft, ...meta.chunk, separator },
+        unsaved: false, saved: true, etag,
       })
     } catch (e) {
       fail("无法打开 Markdown", e)
@@ -245,7 +330,7 @@ export default function App() {
 
   useEffect(() => () => void (pollRef.current && clearTimeout(pollRef.current)), [])
 
-  // 整页拖放：任意位置松开即转换（拖拽区自己处理的除外）
+  // 整页拖放：任意位置松开即上传（拖拽区自己处理的除外）；只拖入一个 PDF 时直接开始解析
   useEffect(() => {
     if (!project) return
     let depth = 0
@@ -264,11 +349,11 @@ export default function App() {
     const drop = (e: DragEvent) => {
       depth = 0
       setDragging(false)
-      if (!hasFiles(e)) return
+      if (!hasFiles(e) || !e.dataTransfer) return
       const handled = e.defaultPrevented
       e.preventDefault()
-      const f = e.dataTransfer?.files[0]
-      if (f && !handled) openFile(f)
+      // 必须在事件回调内同步读取 DataTransfer，之后它会失效
+      if (!handled) void itemsFromDrop(e.dataTransfer).then((items) => upload(items, true))
     }
     window.addEventListener("dragenter", enter)
     window.addEventListener("dragleave", leave)
@@ -280,7 +365,7 @@ export default function App() {
       window.removeEventListener("dragover", over)
       window.removeEventListener("drop", drop)
     }
-  }, [project, openFile])
+  }, [project, upload])
 
   // ---------------------------------------------------------------- 分块参数
 
@@ -291,11 +376,9 @@ export default function App() {
     const reuseParsed = !!doc.jobId && !!usedConvert && sameConvert(settings.convert, usedConvert, parser)
     const separatorOnly = reuseParsed && sameExceptSeparator(settings.chunk, applied) && settings.chunk.separator !== applied.separator
     closeDrawer()
-    setConvertOpts(settings.convert)
-    setDraft(settings.chunk)
 
     if (!reuseParsed) {
-      convert(doc.file, doc.path, settings)
+      void convert(doc.path, settings)
       return
     }
     setBusy(true)
@@ -314,6 +397,128 @@ export default function App() {
     }
   }
 
+  // ---------------------------------------------------------------- 批量
+
+  const startBatch = async (paths: string[], skipConverted: boolean, settings: ParseSettings) => {
+    if (!project) return
+    closeDrawer()
+    try {
+      const batch = await createBatch(project.name, paths, settings, skipConverted)
+      setLatestBatch(batch.id)
+      const queued = batch.counts.queued
+      toast({
+        title: queued ? `已提交 ${queued} 个文件，开始批量解析` : "所选文件都已转换，没有需要解析的文件",
+        description: batch.counts.skipped ? `跳过 ${batch.counts.skipped} 个已转换的文件` : undefined,
+        status: queued ? "success" : "info",
+      })
+      setProject(await rescan(project).catch(() => project))
+    } catch (e) {
+      fail("提交批量解析失败", e)
+    }
+  }
+
+  const refreshQuietly = useCallback(() => {
+    if (project) void rescan(project).then(setProject, () => undefined)
+  }, [project])
+
+  // ---------------------------------------------------------------- FastGPT
+
+  const openSettings = () => {
+    setSettingsSeq((n) => n + 1)
+    setSettingsOpen(true)
+  }
+
+  /** 导入当前打开的已保存版本；遇到不是本系统导入的同名集合时询问替换还是保留。 */
+  const importCurrent = async () => {
+    if (!project || !current || importing) return
+    if (!current.saved || current.unsaved) {
+      toast({ title: "请先保存这个版本，再导入 FastGPT", status: "info" })
+      return
+    }
+    if (!project.fastgpt.configured) {
+      toast({ title: "服务端未配置 FastGPT，无法导入", description: "请联系管理员配置 STRATUM_FASTGPT_URL 和 STRATUM_FASTGPT_API_KEY", status: "error" })
+      return
+    }
+    if (!project.fastgpt.dataset) {
+      toast({ title: "请先在知识库设置中绑定 FastGPT 知识库", status: "info" })
+      openSettings()
+      return
+    }
+    setImporting(true)
+    try {
+      const body = { pdf_path: current.pdfPath, md_path: current.path }
+      let result = await importToFastgpt(project.name, body)
+      if (result.status === "conflict") {
+        if (window.confirm(`${result.message}。\n\n确定：删除它，用这个版本替换\n取消：再选择是否保留两份`)) {
+          result = await importToFastgpt(project.name, { ...body, on_conflict: "replace" })
+        } else if (window.confirm("保留原有集合，并新增一份？")) {
+          result = await importToFastgpt(project.name, { ...body, on_conflict: "keep" })
+        } else {
+          return
+        }
+      }
+      const dataset = project.fastgpt.dataset.name
+      if (result.status === "imported") {
+        toast({
+          title: `已导入「${dataset}」${result.chunks != null ? `，共 ${result.chunks} 块` : ""}`,
+          description: result.message ?? (result.replaced ? "已替换旧版本的集合" : undefined),
+          status: result.message ? "info" : "success",
+        })
+      } else if (result.status === "unchanged") {
+        toast({ title: "这个版本已导入，内容没有变化", status: "info" })
+      } else {
+        toast({ title: "导入 FastGPT 失败", description: result.message ?? undefined, status: "error" })
+      }
+      setProject(await rescan(project).catch(() => project))
+    } catch (e) {
+      fail("导入 FastGPT 失败", e)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const importStatus = (() => {
+    if (!project?.fastgpt.configured || !current) return null
+    const canImport = current.saved && !current.unsaved
+    const button = (
+      <Hint label={canImport ? "把这个版本导入绑定的 FastGPT 知识库" : "先保存这个版本，再导入"}>
+        <Button
+          aria-label="导入 FastGPT"
+          className="rounded-full"
+          disabled={importing || busy || saveState === "loading"}
+          onClick={importCurrent}
+          size="xs"
+          variant="outline"
+        >
+          {importing ? <LoaderCircle className="animate-spin" /> : <Send />}
+          {importing ? "导入中" : "导入 FastGPT"}
+        </Button>
+      </Hint>
+    )
+    if (!project.fastgpt.dataset) return button
+    const record = project.fastgpt.imports[current.pdfPath]
+    let text = "未导入 FastGPT"
+    let tone = "text-muted-foreground"
+    if (record?.error) {
+      text = "FastGPT 导入失败"
+      tone = "text-red-600 dark:text-red-400"
+    } else if (record?.md_path === current.path) {
+      // 用文件标识判断：导入后这个版本又被修改过（或有未保存的编辑）时需要重新导入
+      const changed = current.unsaved || (!!record.md_etag && record.md_etag !== current.etag)
+      text = changed ? "已修改，需重新导入" : `已导入 FastGPT${record.chunks != null ? ` · ${record.chunks} 块` : ""}`
+      tone = changed ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
+    } else if (record) {
+      text = `FastGPT 中为 ${baseName(record.md_path)}`
+      tone = "text-amber-600 dark:text-amber-400"
+    }
+    return (
+      <span className="flex items-center gap-2">
+        <span className={`whitespace-nowrap text-xs ${tone}`} title={record?.error ?? undefined}>{text}</span>
+        {button}
+      </span>
+    )
+  })()
+
   // ---------------------------------------------------------------- 编辑与导出
 
   const onMarkdown = (md: string) => {
@@ -325,28 +530,46 @@ export default function App() {
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" })
     const a = document.createElement("a")
     a.href = URL.createObjectURL(blob)
-    a.download = doc.mdPath.split("/").pop()!
+    a.download = baseName(doc.mdPath)
     a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 1000)
-    updateCurrent({ unsaved: false })
   }
 
   const save = useCallback(async () => {
-    if (!project?.writable || !current || pending || preview || busy || saveState !== "idle") return
+    if (!project || !current || pending || preview || busy || saveState !== "idle") return
     if (current.saved && overwriteOk.current !== current.path) {
       if (!window.confirm(`确定保存对 ${current.path} 的修改？`)) return
     }
     setSaveState("loading")
     try {
-      await writeMarkdown(project, current.path, current.markdown, current.saved)
-      overwriteOk.current = current.path
-      updateCurrent({ unsaved: false, saved: true })
-      const output = { path: current.path, pdfPath: current.pdfPath, version: current.version }
-      setProject((p) => p && {
-        ...p,
-        files: p.files.map((file) => file.path === current.pdfPath ? { ...file, converted: true } : file),
-        artifacts: [...p.artifacts.filter((file) => file.path !== current.path), output],
-      })
+      if (current.saved) {
+        const { etag } = await overwriteMarkdown(project.name, current.path, current.markdown, current.etag)
+        updateCurrent({ unsaved: false, etag })
+        overwriteOk.current = current.path
+      } else {
+        const saved = await saveVersion(project.name, {
+          pdf_path: current.pdfPath, markdown: current.markdown, version: current.version,
+          job_id: current.doc.jobId, convert: current.convert, chunk: current.chunk,
+        })
+        // 预定的版本号可能已被其他人占用，服务端会顺延；同步改名，并让占用了新路径的未保存版本重新编号
+        setArtifacts((items) => {
+          const renamed = items.map((item) => item.path !== current.path ? item : {
+            ...item, path: saved.path, version: saved.version, etag: saved.etag, unsaved: false, saved: true,
+            doc: { ...item.doc, mdPath: saved.path },
+          })
+          return renamed.map((item) => {
+            if (item.saved || item.path !== saved.path) return item
+            const next = nextMarkdownFile(item.pdfPath, [...project.artifacts, ...renamed, { path: saved.path, pdfPath: saved.pdf_path, version: saved.version }])
+            return { ...item, ...next, doc: { ...item.doc, mdPath: next.path } }
+          })
+        })
+        setActiveArtifact(saved.path)
+        overwriteOk.current = saved.path
+        if (saved.path !== current.path) {
+          toast({ title: `${baseName(current.path)} 已被占用，保存为 ${baseName(saved.path)}`, status: "info" })
+        }
+      }
+      setProject(await rescan(project).catch(() => project))
       setSaveState("success")
     } catch (e) {
       fail("保存失败", e)
@@ -362,7 +585,7 @@ export default function App() {
   }, [saveState])
 
   useEffect(() => {
-    if (!project?.writable) return
+    if (!project) return
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault()
@@ -374,22 +597,21 @@ export default function App() {
   }, [project, save])
 
   useEffect(() => {
-    if (!unsaved) return
+    if (!unsaved && !uploading) return
     const handler = (e: BeforeUnloadEvent) => e.preventDefault()
     window.addEventListener("beforeunload", handler)
     return () => window.removeEventListener("beforeunload", handler)
-  }, [unsaved])
+  }, [unsaved, uploading])
 
-  // ---------------------------------------------------------------- 项目
+  // ---------------------------------------------------------------- 切换知识库
 
-  // 先确认再打开：用户取消目录选择时，当前项目和结果保持不变
-  const switchProject = async (task: () => Promise<Project | null>) => {
+  /** name 为 null 时回到知识库列表。用户取消确认时当前知识库和结果保持不变。 */
+  const switchProject = async (name: string | null) => {
     if (busy || saveState === "loading") return
-    if (unsaved && !window.confirm("项目中有未保存的版本，确定切换项目？")) return
-    if (pending && !window.confirm("正在转换，确定切换项目？")) return
+    if (uploading && !window.confirm("正在上传，确定离开当前知识库？")) return
+    if (unsaved && !window.confirm("当前知识库中有未保存的版本，确定离开？")) return
+    if (pending && !window.confirm("正在解析，确定离开当前知识库？")) return
     try {
-      const next = await task()
-      if (!next) return
       runRef.current += 1
       if (pollRef.current) clearTimeout(pollRef.current)
       setPending(null)
@@ -399,9 +621,16 @@ export default function App() {
       overwriteOk.current = null
       setPreview(null)
       setDrawer(null)
-      setProject(next)
+      setBatchOpen(false)
+      setLatestBatch(null)
+      setSettingsOpen(false)
+      if (name) await openProject(name)
+      else {
+        setProject(null)
+        rememberKb(null)
+      }
     } catch (e) {
-      fail("无法打开目录", e)
+      fail("无法打开知识库", e)
     }
   }
 
@@ -410,27 +639,48 @@ export default function App() {
     try {
       setProject(await rescan(project))
     } catch (e) {
-      fail("重新扫描失败", e)
+      fail("刷新失败", e)
     }
   }
+
+  if (booting) return <div className="h-svh bg-muted/30" />
 
   return (
     <TooltipProvider delay={350}>
       {project ? (
         <Workspace
-          activePath={drawer?.open ? drawer.path : pending ? (pending.path ?? null) : (preview?.path ?? doc?.path ?? null)}
+          activePath={drawer?.open && !drawer.batch ? drawer.path : pending ? pending.path : batchOpen ? null : (preview?.path ?? doc?.path ?? null)}
+          batch={batchOpen ? (
+            <BatchStage
+              latestBatch={latestBatch}
+              onClose={() => setBatchOpen(false)}
+              onOpen={(mdPath) => void selectArtifact(mdPath)}
+              onProgress={refreshQuietly}
+              onSettings={openSettings}
+              onStart={(paths, skipConverted) =>
+                setDrawer((d) => ({ path: "", view: "config", reparse: false, open: true, seq: (d?.seq ?? 0) + 1, batch: { paths, skipConverted } }))}
+              project={project}
+            />
+          ) : null}
+          onSettings={openSettings}
+          importStatus={importStatus}
+          onBatch={() => {
+            if (pending || busy) return
+            setPreview(null)
+            setBatchOpen((v) => !v)
+          }}
           busy={busy}
           doc={doc}
           draft={applied}
           markdown={markdown}
           onDownload={download}
-          onAddPdf={addPdf}
-          onFile={openFile}
+          onUpload={(items) => upload(items)}
+          onFiles={(items) => upload(items, true)}
           onSwitchProject={switchProject}
           onClosePreview={() => setPreview(null)}
           onParsePreview={() => preview && openDrawer(preview.path, "config")}
           onMarkdown={onMarkdown}
-          onReparse={() => doc && openDrawer(doc.path ?? doc.file.name, "config", true)}
+          onReparse={() => doc && openDrawer(doc.path, "config", true)}
           onSelectArtifact={selectArtifact}
           artifacts={artifacts.map(({ path, pdfPath, version, unsaved }) => ({ path, pdfPath, version, unsaved }))}
           onRefresh={refresh}
@@ -441,14 +691,16 @@ export default function App() {
           project={project}
           saveState={saveState}
           separator={applied.separator}
+          uploading={uploading}
         />
       ) : (
-        <ProjectPicker onOpen={setProject} />
+        <KbPicker onOpen={(name) => openProject(name)} />
       )}
-      {dragging && (doc || pending) && (
+      {dragging && project && (doc || pending || preview) && (
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-background/70 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3 rounded-3xl border-2 border-foreground/20 border-dashed px-16 py-12 text-muted-foreground">
             <Upload className="size-8" strokeWidth={1.5} />
+            <span className="text-sm">松开即上传到「{project.name}」</span>
           </div>
         </div>
       )}
@@ -458,12 +710,31 @@ export default function App() {
           initialView={drawer.view}
           key={drawer.seq}
           onClose={closeDrawer}
-          onParse={(settings) => drawer.reparse ? reparse(settings) : parse(drawer.path, settings)}
+          confirmLabel={drawer.batch ? `开始批量解析（${drawer.batch.paths.length}）` : undefined}
+          onParse={(settings) => drawer.batch
+            ? startBatch(drawer.batch.paths, drawer.batch.skipConverted, settings)
+            : drawer.reparse ? reparse(settings) : parse(drawer.path, settings)}
           onPreview={() => previewPath(drawer.path)}
           open={drawer.open}
           path={drawer.path}
           reparse={drawer.reparse}
           settings={drawer.reparse ? { convert: usedConvert ?? convertOpts, chunk: applied } : { convert: convertOpts, chunk: draft }}
+        />
+      )}
+      {project && (
+        <KbSettingsDrawer
+          catalog={catalog}
+          key={`${project.name}:${settingsSeq}`}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={(settings, fastgptState) => {
+            setConvertOpts(settings.convert)
+            setDraft(settings.chunk)
+            setProject((p) => p && { ...p, fastgpt: fastgptState })
+            void refreshQuietly()
+          }}
+          open={settingsOpen}
+          project={project}
+          settings={{ convert: convertOpts, chunk: draft }}
         />
       )}
       <Toaster />

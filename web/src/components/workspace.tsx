@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react"
-import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react"
+import { useMemo, useState, type PointerEvent, type ReactNode } from "react"
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Settings2 } from "lucide-react"
 
 import type { ChunkOptions, ConvertResult } from "@/lib/api"
-import { pdfUrl } from "@/lib/api"
-import type { Project } from "@/lib/project"
+import type { Project, UploadItem } from "@/lib/library"
+import { pdfUrl } from "@/lib/library"
 import { joinChunks, renderMarkdown, splitChunks } from "@/lib/chunks"
 import { Button } from "@/components/ui/button"
 import { NumberTicker } from "@/components/motion/number-ticker"
@@ -20,18 +20,17 @@ import { ArtifactNav, type ArtifactNavItem } from "@/components/artifact-nav"
 import { ResultActions } from "@/components/result-actions"
 import { ConvertingStage, EmptyStage, PreviewStage, type Pending } from "@/components/stage"
 
-/** 未解析的原文预览：本地文件的 blob URL */
+/** 未解析的原文预览 */
 export interface Preview {
   path: string
   url: string
 }
 
 export interface Doc {
-  /** 从目录打开的 Markdown 没有服务端任务。 */
+  /** 从知识库打开的已保存 Markdown 没有解析任务。 */
   jobId: string | null
-  file: File
-  /** 项目内的相对路径；拖入的外部文件没有 */
-  path?: string
+  /** 知识库内的 PDF 相对路径 */
+  path: string
   mdPath: string
   result: ConvertResult | null
 }
@@ -42,15 +41,25 @@ interface WorkspaceProps {
   activePath: string | null
   onSelectPath: (path: string) => void
   onRefresh: () => void
-  onSwitchProject: (task: () => Promise<Project | null>) => void
+  /** 切换知识库；null 回到知识库列表 */
+  onSwitchProject: (name: string | null) => void
   doc: Doc | null
   pending: Pending | null
   preview: Preview | null
   /** 从预览直接进入解析配置 */
   onParsePreview: () => void
   onClosePreview: () => void
-  onAddPdf: (file: File) => void
-  onFile: (file: File) => void
+  /** 侧栏上传：只上传 */
+  onUpload: (items: UploadItem[]) => void
+  /** 主区域拖入或选择：只有一个 PDF 时上传后直接解析 */
+  onFiles: (items: UploadItem[]) => void
+  uploading: { loaded: number; total: number } | null
+  /** 批量处理视图；打开时占据主区域 */
+  batch: ReactNode | null
+  onBatch: () => void
+  onSettings: () => void
+  /** 当前版本在 FastGPT 中的导入状态与导入按钮 */
+  importStatus: ReactNode
   markdown: string
   separator: string
   onMarkdown: (md: string) => void
@@ -75,8 +84,8 @@ export function Workspace(props: WorkspaceProps) {
   const [navOpen, setNavOpen] = useState(true)
   const [page, setPage] = useState<number | null>(null)
   // 预览其他文件时，复制、下载、保存都不针对当前结果，先禁用
-  const ready = doc !== null && pending === null && preview === null
-  const title = pending ? (pending.path ?? pending.file.name) : (preview?.path ?? doc?.path ?? doc?.file.name)
+  const ready = doc !== null && pending === null && preview === null && !props.batch
+  const title = pending ? pending.path : props.batch ? "批量处理" : (preview?.path ?? doc?.path)
 
   // 拖动 PDF 面板左边缘调整宽度；pointer capture 保证鼠标经过 iframe 时仍能收到事件
   const resizePdf = (e: PointerEvent<HTMLDivElement>) => {
@@ -96,6 +105,11 @@ export function Workspace(props: WorkspaceProps) {
           </Button>
         </Hint>
         <ProjectSwitcher onSwitch={props.onSwitchProject} project={project} />
+        <Hint label="知识库设置：FastGPT 绑定、默认解析参数">
+          <Button aria-label="知识库设置" onClick={props.onSettings} size="icon-sm" variant="ghost">
+            <Settings2 />
+          </Button>
+        </Hint>
         <span className="text-muted-foreground/60">/</span>
         <h1 className="min-w-0 truncate font-medium" title={title}>
           {title ?? <span className="text-muted-foreground">未选择文件</span>}
@@ -122,10 +136,13 @@ export function Workspace(props: WorkspaceProps) {
             <ProjectNav
               active={props.activePath}
               locked={!!pending || props.busy || props.saveState === "loading"}
-              onAddPdf={props.onAddPdf}
               onRefresh={props.onRefresh}
               onSelect={props.onSelectPath}
+              onUpload={props.onUpload}
+              onBatch={props.onBatch}
+              batchOpen={!!props.batch}
               project={project}
+              uploading={props.uploading}
             />
             <ArtifactNav
               artifacts={props.artifacts}
@@ -140,6 +157,8 @@ export function Workspace(props: WorkspaceProps) {
         <main className="min-h-0 min-w-0">
           {pending ? (
             <ConvertingStage {...pending} />
+          ) : props.batch ? (
+            props.batch
           ) : preview ? (
             <PreviewStage onClose={props.onClosePreview} onParse={props.onParsePreview} title={preview.path} url={preview.url} />
           ) : doc ? (
@@ -152,10 +171,10 @@ export function Workspace(props: WorkspaceProps) {
                   onReparse={props.onReparse}
                   onSave={props.onSave}
                   saveState={props.saveState}
-                  writable={project.writable}
                 />
               }
               busy={props.busy}
+              importStatus={props.importStatus}
               key={doc.mdPath}
               draft={props.draft}
               markdown={markdown}
@@ -166,8 +185,9 @@ export function Workspace(props: WorkspaceProps) {
             />
           ) : (
             <EmptyStage
-              onFile={props.onFile}
-              title={project.files.length ? "从左侧选择 PDF，或拖入目录外的 PDF" : "拖入 PDF 或点击选择"}
+              disabled={!!props.uploading}
+              onFiles={props.onFiles}
+              title={props.uploading ? "正在上传…" : project.files.length ? "从左侧选择 PDF，或拖入新的 PDF / 文件夹" : "拖入 PDF 或文件夹，或点击上传"}
             />
           )}
         </main>
@@ -180,7 +200,7 @@ export function Workspace(props: WorkspaceProps) {
               onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)}
               onPointerMove={resizePdf}
             />
-            <SourcePdf doc={doc} page={page} />
+            <SourcePdf doc={doc} kb={project.name} page={page} />
           </section>
         )}
       </div>
@@ -188,17 +208,9 @@ export function Workspace(props: WorkspaceProps) {
   )
 }
 
-/** 服务端结果与本地 Markdown 共用原文面板；卸载或换文件时释放本地 URL。 */
-function SourcePdf({ doc: { file, jobId }, page }: { doc: Doc; page: number | null }) {
-  const frame = useRef<HTMLIFrameElement>(null)
-  useEffect(() => {
-    const url = jobId ? pdfUrl(jobId) : URL.createObjectURL(file)
-    if (frame.current) frame.current.src = `${url}${page ? `#page=${page}` : ""}`
-    return () => {
-      if (!jobId) URL.revokeObjectURL(url)
-    }
-  }, [file, jobId, page])
-  return <iframe className="size-full" key={`${jobId ?? file.name}:${page ?? 0}`} ref={frame} title={file.name} />
+/** 原文面板：直接显示知识库中的 PDF，点击页码时跳到对应页。 */
+function SourcePdf({ doc: { path }, kb, page }: { doc: Doc; kb: string; page: number | null }) {
+  return <iframe className="size-full" key={`${path}:${page ?? 0}`} src={pdfUrl(kb, path, page)} title={path} />
 }
 
 /** 结果工具栏右侧的文档统计。 */
@@ -230,6 +242,7 @@ type Tab = "chunks" | "markdown" | "preview"
 
 interface ResultViewProps {
   actions: ReactNode
+  importStatus: ReactNode
   busy: boolean
   result: ConvertResult | null
   markdown: string
@@ -239,7 +252,7 @@ interface ResultViewProps {
   onPage: (page: number) => void
 }
 
-function ResultView({ actions, busy, result, markdown, separator, draft, onMarkdown, onPage }: ResultViewProps) {
+function ResultView({ actions, importStatus, busy, result, markdown, separator, draft, onMarkdown, onPage }: ResultViewProps) {
   const [tab, setTab] = useState<Tab>("chunks")
   const [filter, setFilter] = useState<ChunkFilter>("all")
   // 最近一次删除块：markdown 仍是删除后的内容时才可撤销
@@ -279,7 +292,10 @@ function ResultView({ actions, busy, result, markdown, separator, draft, onMarkd
                 value={filter}
               />
             )}
-            <div className="ml-auto"><DocStats chunks={chunks.length} result={result} /></div>
+            <div className="ml-auto flex items-center gap-3">
+              {importStatus}
+              <DocStats chunks={chunks.length} result={result} />
+            </div>
           </div>
         </div>
       </div>

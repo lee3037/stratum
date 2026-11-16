@@ -1,0 +1,29 @@
+# Stratum 层析 systemd 服务。
+# 安装：
+#   sudo cp deploy/stratum.service /etc/systemd/system/stratum.service
+#   按实际情况修改下面的 User、WorkingDirectory、ExecStart 路径
+#   sudo mkdir -p /etc/stratum && sudo cp deploy/stratum.env.example /etc/stratum/stratum.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now stratum
+# 查看日志：journalctl -u stratum -f
+
+[Unit]
+Description=Stratum PDF to chunked Markdown service
+After=network.target
+
+[Service]
+Type=simple
+User=stratum
+Group=stratum
+WorkingDirectory=/opt/stratum
+EnvironmentFile=/etc/stratum/stratum.env
+ExecStart=/opt/stratum/.venv/bin/python -m uvicorn app.server:app --host ${HOST} --port ${PORT}
+Restart=on-failure
+RestartSec=5
+# 资源上限：最多使用 32 个核、24 GB 内存，避免影响同机的大模型和 FastGPT 服务。
+CPUQuota=3200%
+MemoryMax=24G
+# 新建的文件允许同组用户读写，方便管理员在服务器上整理文件库。
+UMask=0002
+
+[Install]
+WantedBy=multi-user.target

@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 web/node_modules/
 web/*.tsbuildinfo
+
+# 本地数据与部署配置
+data/
+stratum.env

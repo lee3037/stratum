@@ -74,33 +74,31 @@ export function SettingsPanel(props: SettingsPanelProps) {
   return (
     <div className={cn("flex flex-col gap-3", props.className)}>
       <Section icon={<ScanLine />} title="识别">
-        <div className="flex flex-col gap-2">
-          <ModelSelector
-            ariaLabel="解析方案"
-            className="w-full max-w-none"
-            models={[
-              ...catalog.parsers.map((p) => ({
-                id: p.id,
-                name: p.name,
-                badge: p.id === "oxr" ? "远程" : "本机",
-              })),
-              // 已保存的方案不在目录中时如实显示，不悄悄换成其他方案
-              ...(parser ? [] : [{ id: convert.parser, name: convert.parser, description: "暂不可用", disabled: true }]),
-            ]}
-            onChange={(v) => setConvert("parser", v)}
-            value={convert.parser}
-          />
-          {catalog.failed && (
-            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-              无法加载解析方案
-              <Button onClick={catalog.reload} size="xs" variant="ghost">
-                重试
-              </Button>
-            </div>
-          )}
-        </div>
-        {parser?.id === "oxr" && (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">文件将发送到 OXR 服务。</p>
+        {/* 只有一种解析方案时不显示选择器 */}
+        {(catalog.parsers.length > 1 || !parser || catalog.failed) && (
+          <div className="flex flex-col gap-2">
+            {(catalog.parsers.length > 1 || !parser) && (
+              <ModelSelector
+                ariaLabel="解析方案"
+                className="w-full max-w-none"
+                models={[
+                  ...catalog.parsers.map((p) => ({ id: p.id, name: p.name })),
+                  // 已保存的方案不在目录中时如实显示，不悄悄换成其他方案
+                  ...(parser ? [] : [{ id: convert.parser, name: convert.parser, description: "暂不可用", disabled: true }]),
+                ]}
+                onChange={(v) => setConvert("parser", v)}
+                value={convert.parser}
+              />
+            )}
+            {catalog.failed && (
+              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                无法加载解析方案
+                <Button onClick={catalog.reload} size="xs" variant="ghost">
+                  重试
+                </Button>
+              </div>
+            )}
+          </div>
         )}
         {parser?.local_ocr_options && (
           <Field label="OCR">

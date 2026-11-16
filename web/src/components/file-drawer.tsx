@@ -19,7 +19,7 @@ export interface ParseSettings {
 export type FileDrawerView = "menu" | "config"
 
 interface FileDrawerProps {
-  /** 项目内的 PDF 相对路径 */
+  /** 知识库内的 PDF 相对路径 */
   path: string
   open: boolean
   initialView: FileDrawerView
@@ -30,6 +30,8 @@ interface FileDrawerProps {
   onPreview: () => void
   onClose: () => void
   reparse?: boolean
+  /** 确认按钮文字；缺省为「开始解析」或「重新解析分块」 */
+  confirmLabel?: string
 }
 
 const TONES = {
@@ -75,7 +77,7 @@ function Header({ title, onClose }: { title: string; onClose: () => void }) {
  * 点选 PDF 后弹出的底部抽屉：先选操作，再确认本次解析配置。
  * 改写自 Spectrum UI 的 Animated Drawer：切换内容时高度跟随实际内容平滑变化。
  */
-export function FileDrawer({ path, open, initialView, settings, catalog, onParse, onPreview, onClose, reparse = false }: FileDrawerProps) {
+export function FileDrawer({ path, open, initialView, settings, catalog, onParse, onPreview, onClose, reparse = false, confirmLabel }: FileDrawerProps) {
   const [view, setView] = useState(initialView)
   const [draft, setDraft] = useState(settings)
   const { chunk, convert } = draft
@@ -139,7 +141,8 @@ export function FileDrawer({ path, open, initialView, settings, catalog, onParse
                       value={draft.chunk}
                     />
                   </div>
-                  <div className="mt-4 flex items-center gap-2.5 px-[3px]">
+                  <p className="mt-3 px-1 text-[11px] text-muted-foreground">这里的调整只对这次解析有效；知识库默认参数在「知识库设置」中修改。</p>
+                  <div className="mt-3 flex items-center gap-2.5 px-[3px]">
                     <Button
                       className="h-10 w-[35%] rounded-3xl bg-neutral-100 text-neutral-900 hover:bg-neutral-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
                       onClick={() => (initialView === "config" ? onClose() : setView("menu"))}
@@ -152,7 +155,7 @@ export function FileDrawer({ path, open, initialView, settings, catalog, onParse
                       onClick={() => onParse(draft)}
                     >
                       <Layers />
-                      {reparse ? "重新解析分块" : "开始解析"}
+                      {confirmLabel ?? (reparse ? "重新解析分块" : "开始解析")}
                     </Button>
                   </div>
                 </>

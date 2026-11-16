@@ -88,13 +88,6 @@ export async function getParsers() {
   return (await json<{ parsers: ParserInfo[] }>(await fetch("api/parsers"))).parsers
 }
 
-export async function createJob(file: File, options: ConvertOptions & ChunkOptions) {
-  const fd = new FormData()
-  fd.append("file", file)
-  fd.append("options", JSON.stringify(options))
-  return json<{ id: string; page_count: number }>(await fetch("api/jobs", { method: "POST", body: fd }))
-}
-
 export async function getJob(id: string) {
   return json<Job>(await fetch(`api/jobs/${id}`))
 }
@@ -109,4 +102,3 @@ export async function rechunk(id: string, options: ChunkOptions) {
   )
 }
 
-export const pdfUrl = (id: string, page?: number | null) => `api/jobs/${id}/pdf${page ? `#page=${page}` : ""}`

@@ -428,7 +428,48 @@ export default function App() {
     setSettingsOpen(true)
   }
 
-  /** 导入当前打开的已保存版本；遇到不是本系统导入的同名集合时询问替换还是保留。 */
+  /** 导入一个已保存的版本；遇到不是本系统导入的同名集合时询问替换还是保留。auto：保存后自动导入 */
+  const importVersion = async (proj: Project, pdfPath: string, mdPath: string, auto = false) => {
+    const dataset = proj.fastgpt.dataset?.name
+    if (!dataset) return
+    setImporting(true)
+    try {
+      const body = { pdf_path: pdfPath, md_path: mdPath }
+      let result = await importToFastgpt(proj.name, body)
+      if (result.status === "conflict") {
+        if (window.confirm(`${result.message}。\n\n确定：删除它，用这个版本替换\n取消：再选择是否保留两份`)) {
+          result = await importToFastgpt(proj.name, { ...body, on_conflict: "replace" })
+        } else if (window.confirm("保留原有集合，并新增一份？")) {
+          result = await importToFastgpt(proj.name, { ...body, on_conflict: "keep" })
+        } else {
+          return
+        }
+      }
+      if (result.status === "imported") {
+        toast({
+          title: `${auto ? "已保存并自动导入" : "已导入"}「${dataset}」${result.chunks != null ? `，共 ${result.chunks} 块` : ""}`,
+          description: result.message ?? (result.replaced ? "已替换旧版本的集合" : undefined),
+          status: result.message ? "info" : "success",
+        })
+      } else if (result.status === "unchanged") {
+        if (!auto) toast({ title: "这个版本已导入，内容没有变化", status: "info" })
+      } else {
+        toast({ title: auto ? "已保存，但自动导入 FastGPT 失败" : "导入 FastGPT 失败", description: result.message ?? undefined, status: "error" })
+      }
+      setProject(await rescan(proj).catch(() => proj))
+    } catch (e) {
+      fail(auto ? "已保存，但自动导入 FastGPT 失败" : "导入 FastGPT 失败", e)
+    } finally {
+      setImporting(false)
+    }
+  }
+  // save 用 useCallback 缓存，通过 ref 调用最新的 importVersion
+  const importVersionRef = useRef(importVersion)
+  useEffect(() => {
+    importVersionRef.current = importVersion
+  })
+
+  /** 导入当前打开的已保存版本 */
   const importCurrent = async () => {
     if (!project || !current || importing) return
     if (!current.saved || current.unsaved) {
@@ -444,37 +485,7 @@ export default function App() {
       openSettings()
       return
     }
-    setImporting(true)
-    try {
-      const body = { pdf_path: current.pdfPath, md_path: current.path }
-      let result = await importToFastgpt(project.name, body)
-      if (result.status === "conflict") {
-        if (window.confirm(`${result.message}。\n\n确定：删除它，用这个版本替换\n取消：再选择是否保留两份`)) {
-          result = await importToFastgpt(project.name, { ...body, on_conflict: "replace" })
-        } else if (window.confirm("保留原有集合，并新增一份？")) {
-          result = await importToFastgpt(project.name, { ...body, on_conflict: "keep" })
-        } else {
-          return
-        }
-      }
-      const dataset = project.fastgpt.dataset.name
-      if (result.status === "imported") {
-        toast({
-          title: `已导入「${dataset}」${result.chunks != null ? `，共 ${result.chunks} 块` : ""}`,
-          description: result.message ?? (result.replaced ? "已替换旧版本的集合" : undefined),
-          status: result.message ? "info" : "success",
-        })
-      } else if (result.status === "unchanged") {
-        toast({ title: "这个版本已导入，内容没有变化", status: "info" })
-      } else {
-        toast({ title: "导入 FastGPT 失败", description: result.message ?? undefined, status: "error" })
-      }
-      setProject(await rescan(project).catch(() => project))
-    } catch (e) {
-      fail("导入 FastGPT 失败", e)
-    } finally {
-      setImporting(false)
-    }
+    await importVersion(project, current.pdfPath, current.path)
   }
 
   const importStatus = (() => {
@@ -542,6 +553,7 @@ export default function App() {
     }
     setSaveState("loading")
     try {
+      let savedPath = current.path
       if (current.saved) {
         const { etag } = await overwriteMarkdown(project.name, current.path, current.markdown, current.etag)
         updateCurrent({ unsaved: false, etag })
@@ -565,12 +577,17 @@ export default function App() {
         })
         setActiveArtifact(saved.path)
         overwriteOk.current = saved.path
+        savedPath = saved.path
         if (saved.path !== current.path) {
           toast({ title: `${baseName(current.path)} 已被占用，保存为 ${baseName(saved.path)}`, status: "info" })
         }
       }
-      setProject(await rescan(project).catch(() => project))
+      const fresh = await rescan(project).catch(() => project)
+      setProject(fresh)
       setSaveState("success")
+      if (fresh.fastgpt.configured && fresh.fastgpt.dataset && fresh.fastgpt.auto_import) {
+        void importVersionRef.current(fresh, current.pdfPath, savedPath, true)
+      }
     } catch (e) {
       fail("保存失败", e)
       setSaveState("error")

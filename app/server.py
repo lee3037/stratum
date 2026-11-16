@@ -139,6 +139,7 @@ def _batch_convert(pdf: str, options: dict) -> dict:
 batches = BatchManager(_batch_convert, BATCH_CONCURRENCY)
 fastgpt_client = fastgpt.Client()
 imports = fastgpt.ImportJobs(lambda: fastgpt_client)
+batches.after_save = lambda kb, pdf: fastgpt.auto_import(fastgpt_client, storage.kb_dir(kb), pdf)
 _exports: dict[str, dict] = {}
 
 
@@ -563,6 +564,18 @@ def bind_fastgpt(kb: str, body: BindBody):
         detail = fastgpt_client.dataset_detail(body.dataset_id)
         name = detail.get("name")
     fastgpt.set_binding(folder, body.dataset_id, name)
+    return fastgpt.status_summary(folder)
+
+
+class AutoImportBody(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/kbs/{kb}/fastgpt/auto-import")
+def put_auto_import(kb: str, body: AutoImportBody):
+    """解析结果保存后是否自动导入绑定的 FastGPT 知识库。"""
+    folder = storage.kb_dir(kb)
+    fastgpt.set_auto_import(folder, body.enabled)
     return fastgpt.status_summary(folder)
 
 

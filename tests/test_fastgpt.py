@@ -143,6 +143,30 @@ def test_kb_from_dataset_name_taken(client, fake):
     assert client.post("/api/fastgpt/datasets/ds1/kb").json() == {"name": "安全规程(2)", "created": True}
 
 
+def test_auto_import_toggle_and_run(client, fake):
+    kb = storage.kb_dir(KB)
+    assert client.get(f"/api/kbs/{KB}/fastgpt").json()["auto_import"] is False
+    save("a.pdf", text("一", "二"))
+    # 未开启：不导入
+    assert fastgpt.auto_import(server.fastgpt_client, kb, "a.pdf") is None
+    r = client.put(f"/api/kbs/{KB}/fastgpt/auto-import", json={"enabled": True})
+    assert r.status_code == 200 and r.json()["auto_import"] is True
+    # 开启但未绑定：仍不导入
+    assert fastgpt.auto_import(server.fastgpt_client, kb, "a.pdf") is None
+    client.put(f"/api/kbs/{KB}/fastgpt", json={"dataset_id": "ds1"})
+    assert fastgpt.auto_import(server.fastgpt_client, kb, "a.pdf") == {"status": "imported", "message": None, "chunks": 2}
+    # 修改默认参数不会丢掉开关
+    client.put(f"/api/kbs/{KB}/settings", json=storage.default_settings())
+    assert client.get(f"/api/kbs/{KB}/fastgpt").json()["auto_import"] is True
+    # 别人手动导入的同名集合：无人值守时跳过，不删除
+    fake.collections["x"] = {"_id": "x", "datasetId": "ds1", "name": "c.md"}
+    save("c.pdf", text("三"))
+    assert fastgpt.auto_import(server.fastgpt_client, kb, "c.pdf")["status"] == "skipped"
+    assert "x" in fake.collections
+    client.put(f"/api/kbs/{KB}/fastgpt/auto-import", json={"enabled": False})
+    assert fastgpt.auto_import(server.fastgpt_client, kb, "c.pdf") is None
+
+
 def test_kb_name_from():
     assert storage.kb_name_from("部门 / 规程") == "部门 - 规程"
     assert storage.kb_name_from("..x") == "x"

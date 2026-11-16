@@ -3,7 +3,7 @@ import { LoaderCircle, RefreshCw, X } from "lucide-react"
 import { Drawer } from "vaul"
 
 import type { FastgptDataset, FastgptState, KbSettings, Project } from "@/lib/library"
-import { bindDataset, listDatasets, putSettings } from "@/lib/library"
+import { bindDataset, listDatasets, putSettings, setAutoImport } from "@/lib/library"
 import type { ParserCatalog } from "@/lib/use-parsers"
 import { Button } from "@/components/ui/button"
 import { SettingsPanel } from "@/components/settings-panel"
@@ -25,6 +25,7 @@ const fail = (title: string, e: unknown) =>
 export function KbSettingsDrawer({ open, project, settings, catalog, onClose, onSaved }: KbSettingsDrawerProps) {
   const [draft, setDraft] = useState(settings)
   const [datasetId, setDatasetId] = useState(project.fastgpt.dataset?.id ?? "")
+  const [autoImport, setAutoImportDraft] = useState(project.fastgpt.auto_import)
   const [datasets, setDatasets] = useState<FastgptDataset[] | null>(null)
   const [datasetError, setDatasetError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -50,6 +51,7 @@ export function KbSettingsDrawer({ open, project, settings, catalog, onClose, on
     chunk.max_chars <= 10000 && Number.isInteger(chunk.min_chars) && chunk.min_chars >= 0 && chunk.min_chars <= chunk.max_chars
   const settingsChanged = JSON.stringify(draft) !== JSON.stringify(settings)
   const bindingChanged = datasetId !== (dataset?.id ?? "")
+  const autoImportChanged = autoImport !== project.fastgpt.auto_import
   const imported = Object.keys(project.fastgpt.imports).length
 
   const save = async () => {
@@ -59,7 +61,8 @@ export function KbSettingsDrawer({ open, project, settings, catalog, onClose, on
     setSaving(true)
     try {
       const saved = settingsChanged ? await putSettings(project.name, draft) : settings
-      const fastgpt = bindingChanged ? await bindDataset(project.name, datasetId || null) : project.fastgpt
+      let fastgpt = bindingChanged ? await bindDataset(project.name, datasetId || null) : project.fastgpt
+      if (autoImportChanged) fastgpt = await setAutoImport(project.name, autoImport)
       onSaved({ convert: saved.convert, chunk: saved.chunk }, fastgpt)
       toast({ title: "知识库设置已保存", status: "success" })
       onClose()
@@ -118,6 +121,21 @@ export function KbSettingsDrawer({ open, project, settings, catalog, onClose, on
                     </Button>
                   </div>
                   {datasetError && <p className="text-xs text-red-600 dark:text-red-400">{datasetError}</p>}
+                  <label className={`flex items-start gap-2 text-sm ${datasetId ? "" : "opacity-50"}`}>
+                    <input
+                      checked={autoImport && !!datasetId}
+                      className="mt-0.5 size-4 accent-sky-500"
+                      disabled={!datasetId}
+                      onChange={(e) => setAutoImportDraft(e.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>
+                      保存后自动导入 FastGPT
+                      <span className="block text-[11px] text-muted-foreground">
+                        单个文件保存、批量解析完成后立即导入，不用再点「导入 FastGPT」。关闭时可以先核对、修改，确认后再导入。
+                      </span>
+                    </span>
+                  </label>
                   <p className="text-[11px] text-muted-foreground">
                     导入时，FastGPT 按自定义分隔符「{draft.chunk.separator}」分块，与本系统的分块一一对应；
                     每个 PDF 在 FastGPT 中对应一个集合，导入新版本时自动替换旧集合。
@@ -141,7 +159,7 @@ export function KbSettingsDrawer({ open, project, settings, catalog, onClose, on
             <Button className="h-10 w-[35%] rounded-3xl" onClick={onClose} variant="secondary">取消</Button>
             <Button
               className="h-10 min-w-0 flex-1 rounded-3xl bg-sky-500 text-white hover:bg-sky-600"
-              disabled={!valid || saving || (!settingsChanged && !bindingChanged)}
+              disabled={!valid || saving || (!settingsChanged && !bindingChanged && !autoImportChanged)}
               onClick={save}
             >
               {saving && <LoaderCircle className="animate-spin" />}

@@ -39,6 +39,8 @@ class BatchManager:
         self._cond = threading.Condition()
         self._served: dict[str, float] = {}  # 批次上次被取文件的时间，用于轮转
         self._generation = 0  # 每次 start 递增；旧一代的工作线程醒来后自行退出
+        # after_save(kb 名, PDF 相对路径) -> dict | None：每个文件保存后调用（如自动导入 FastGPT），结果记入 item["fastgpt"]
+        self.after_save: Callable[[str, str], dict | None] | None = None
 
     # ------------------------------------------------------------ 生命周期
 
@@ -302,6 +304,15 @@ class BatchManager:
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             updates = {"status": "error", "error": str(exc) or exc.__class__.__name__}
+        if updates.get("status") == "done" and self.after_save:
+            # 解析结果已保存；后续步骤（自动导入）失败不影响解析状态
+            try:
+                outcome = self.after_save(kb_name, item["path"])
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                outcome = {"status": "error", "message": str(exc) or exc.__class__.__name__}
+            if outcome:
+                updates["fastgpt"] = outcome
         with self._cond:
             item.update(updates, finished=time.time())
             self._refresh_status(batch)

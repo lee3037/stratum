@@ -38,6 +38,8 @@ export interface FastgptState {
   /** 服务端是否配置了 FastGPT 地址与密钥 */
   configured: boolean
   dataset: { id: string; name: string } | null
+  /** 解析结果保存后自动导入绑定的 FastGPT 知识库 */
+  auto_import: boolean
   imports: Record<string, FastgptImport>
   /** 有新版本、导入后又修改过、或上次失败的 PDF */
   pending: string[]
@@ -69,7 +71,7 @@ export interface ImportJob {
 
 export type ConflictPolicy = "ask" | "replace" | "keep" | "skip"
 
-const EMPTY_FASTGPT: FastgptState = { configured: false, dataset: null, imports: {}, pending: [] }
+const EMPTY_FASTGPT: FastgptState = { configured: false, dataset: null, auto_import: false, imports: {}, pending: [] }
 
 export type BatchItemStatus = "queued" | "running" | "done" | "error" | "skipped" | "cancelled"
 
@@ -82,6 +84,8 @@ export interface BatchItem {
   ocr_pages?: number
   error?: string | null
   message?: string | null
+  /** 开启自动导入时，保存后导入 FastGPT 的结果 */
+  fastgpt?: { status: ImportResult["status"]; message?: string | null; chunks?: number | null }
 }
 
 export interface Batch {
@@ -273,6 +277,10 @@ export async function kbFromDataset(datasetId: string) {
 
 export async function bindDataset(kb: string, datasetId: string | null) {
   return json<FastgptState>(await fetch(kbUrl(kb, "/fastgpt"), send("PUT", { dataset_id: datasetId })))
+}
+
+export async function setAutoImport(kb: string, enabled: boolean) {
+  return json<FastgptState>(await fetch(kbUrl(kb, "/fastgpt/auto-import"), send("PUT", { enabled })))
 }
 
 export async function importToFastgpt(kb: string, body: { pdf_path: string; md_path?: string; on_conflict?: ConflictPolicy; force?: boolean }) {

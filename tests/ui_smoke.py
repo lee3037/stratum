@@ -80,11 +80,20 @@ with sync_playwright() as p:
     # 修改冲突用例会故意触发 409，浏览器会把它记为资源加载错误
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "409" not in m.text else None)
 
-    # 新建知识库并进入
+    # 新建知识库并进入。配置了 FastGPT 时首页只列 FastGPT 知识库、不提供新建，改用接口新建，
+    # 它出现在「服务器上的其他知识库」中
     page.goto(BASE)
-    page.get_by_role("button", name="新建知识库").first.click()
-    page.get_by_label("新建知识库").fill(KB)
-    page.get_by_role("button", name="创建并打开").click()
+    if os.environ.get("FAKE_FASTGPT"):
+        req = urllib.request.Request(BASE + "api/kbs", json.dumps({"name": KB}).encode(),
+                                     {"Content-Type": "application/json"})
+        urllib.request.urlopen(req)
+        page.reload()
+        page.get_by_text("服务器上的其他知识库").wait_for()
+        page.get_by_text(KB, exact=True).click()
+    else:
+        page.get_by_role("button", name="新建知识库").first.click()
+        page.get_by_label("新知识库名称").fill(KB)
+        page.get_by_role("button", name="创建并打开").click()
     page.locator("aside").get_by_role("button", name="上传 PDF", exact=True).wait_for()
     checks["新建知识库"] = (DATA / KB).is_dir() and f"kb=" in page.url
     checks["空白时无产物操作"] = page.get_by_role("group", name="Markdown 产物操作").count() == 0
@@ -290,12 +299,36 @@ with sync_playwright() as p:
         checks["导入单个版本并替换旧集合"] = sorted(c["name"] for c in state["collections"]) == names
         checks["侧栏显示待导入"] = page.locator('aside a[href="#complex_cn.pdf"]').get_by_text("待导入").count() == 1
 
+        # 开启自动导入：修改并保存当前版本后自动导入，替换旧集合
+        page.get_by_role("button", name="知识库设置", exact=True).click()
+        drawer = page.get_by_role("dialog")
+        drawer.get_by_label("保存后自动导入 FastGPT").check()
+        drawer.get_by_role("button", name="保存设置").click()
+        drawer.wait_for(state="detached")
+        settings = json.loads((DATA / KB / ".stratum" / "settings.json").read_text("utf-8"))
+        checks["开启自动导入"] = settings.get("fastgpt_auto_import") is True
+        page.get_by_role("radio", name="Markdown", exact=True).click()
+        page.locator("textarea").fill(page.locator("textarea").input_value() + "\n自动导入的修改\n")
+        page.once("dialog", lambda d: d.accept())
+        page.get_by_role("button", name="保存到知识库", exact=True).click()
+        page.get_by_text("已保存并自动导入", exact=False).first.wait_for(timeout=30000)
+        state = json.load(urllib.request.urlopen(fake_url + "/_state"))
+        checks["保存后自动导入"] = (
+            sorted(c["name"] for c in state["collections"]) == names
+            and any("自动导入的修改" in c["text"] for c in state["collections"])
+        )
+
     # 切换知识库：回到列表
     page.locator("header button", has_text=KB).click()
     page.once("dialog", lambda d: d.accept())
     page.get_by_role("menuitem", name="全部知识库 / 新建…").click()
-    page.get_by_text("选择一个知识库").wait_for()
-    checks["返回知识库列表"] = page.get_by_text(KB, exact=True).count() >= 1
+    if fake_url:
+        # 已绑定 ds1：首页以 FastGPT 知识库的名称显示它
+        page.get_by_text("与 FastGPT 同步", exact=False).first.wait_for()
+        checks["返回知识库列表"] = page.get_by_text("安全规程", exact=True).count() == 1 and page.get_by_text(KB, exact=True).count() == 0
+    else:
+        page.get_by_text(KB, exact=True).wait_for()
+        checks["返回知识库列表"] = True
     context.close()
 
     # 触屏：先展开操作栏，再执行操作；没有 PDF 的旧 .md 兼容

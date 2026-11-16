@@ -308,7 +308,10 @@ export function BatchStage({ project, onStart, onProgress, onOpen, onSettings, o
             <span className="text-sm font-medium">导入 FastGPT</span>
             {dataset ? (
               <>
-                <span className="text-xs text-muted-foreground">→「{dataset.name}」，每个 PDF 导入最新保存的版本</span>
+                <span className="text-xs text-muted-foreground">
+                  →「{dataset.name}」，每个 PDF 导入最新保存的版本
+                  {project.fastgpt.auto_import && "。已开启自动导入：批量解析完成的文件会自动导入，遇到非本系统导入的同名集合时跳过"}
+                </span>
                 <select
                   aria-label="遇到同名集合"
                   className="h-8 rounded-lg border border-border bg-background px-2 text-sm"
@@ -502,6 +505,7 @@ function BatchList({ kb, latestBatch, downloading, onProgress, onOpen, onDownloa
                         ? `${item.pages ?? "?"} 页 · ${item.chunks ?? "?"} 块${item.ocr_pages ? ` · OCR ${item.ocr_pages} 页` : ""}`
                         : item.error ?? item.message ?? ""}
                     </span>
+                    {item.fastgpt && <AutoImportTag result={item.fastgpt} />}
                   </li>
                 ))}
               </ul>
@@ -511,4 +515,14 @@ function BatchList({ kb, latestBatch, downloading, onProgress, onOpen, onDownloa
       })}
     </section>
   )
+}
+
+
+/** 批次明细中自动导入 FastGPT 的结果 */
+function AutoImportTag({ result }: { result: NonNullable<BatchItem["fastgpt"]> }) {
+  const tone = result.status === "imported" || result.status === "unchanged"
+    ? "text-emerald-600 dark:text-emerald-400"
+    : result.status === "error" ? "text-red-600 dark:text-red-400" : "text-amber-600 dark:text-amber-400"
+  const label = { imported: "已导入", unchanged: "已导入", skipped: "导入跳过", error: "导入失败" }[result.status as string] ?? result.status
+  return <span className={cn("shrink-0 text-xs", tone)} title={result.message ?? undefined}>{label}</span>
 }

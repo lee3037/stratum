@@ -197,6 +197,21 @@ def set_binding(kb: Path, dataset_id: str | None, dataset_name: str | None) -> d
     return binding(kb)
 
 
+AUTO_IMPORT_KEY = "fastgpt_auto_import"
+
+
+def auto_import_enabled(kb: Path) -> bool:
+    """保存（单个保存或批量解析完成）后是否自动导入；需同时已绑定 FastGPT 知识库。"""
+    return bool(storage.read_settings(kb).get(AUTO_IMPORT_KEY)) and binding(kb) is not None
+
+
+def set_auto_import(kb: Path, enabled: bool) -> None:
+    def apply(current: dict) -> dict:
+        current[AUTO_IMPORT_KEY] = bool(enabled)
+        return current
+    storage.update_json(kb, kb / storage.META_DIR / "settings.json", apply)
+
+
 def _records_path(kb: Path) -> Path:
     return kb / storage.META_DIR / RECORDS
 
@@ -234,6 +249,7 @@ def status_summary(kb: Path) -> dict:
     return {
         "configured": configured(),
         "dataset": {"id": bound["dataset_id"], "name": bound.get("dataset_name")} if bound else None,
+        "auto_import": bool(storage.read_settings(kb).get(AUTO_IMPORT_KEY)),
         "imports": {pdf: {k: rec.get(k) for k in ("version", "md_path", "imported", "chunks", "error", "md_etag")}
                     for pdf, rec in records.items()},
         # 有新版本、导入后又修改过、或上次失败的 PDF
@@ -324,6 +340,18 @@ def _import_one(client: Client, kb: Path, pdf_rel: str, md_rel: str | None, on_c
     _update_record(kb, dataset_id, pdf_rel, record)
     return {"pdf_path": pdf_rel, "status": "imported", "md_path": version["path"], "chunks": created["chunks"],
             "replaced": len(old_ids), "message": "；".join(warnings) or None}
+
+
+def auto_import(client: Client, kb: Path, pdf_rel: str) -> dict | None:
+    """批量解析保存后调用：开启了自动导入时导入最新版本，否则返回 None。
+    无人值守，遇到不是本系统导入的同名集合时跳过（结果里注明），不会删除别人的数据。"""
+    if not configured() or not auto_import_enabled(kb):
+        return None
+    try:
+        result = import_one(client, kb, pdf_rel, None, "skip")
+    except StorageError as exc:
+        result = {"status": "error", "message": str(exc)}
+    return {"status": result["status"], "message": result.get("message"), "chunks": result.get("chunks")}
 
 
 def needs_import(kb: Path) -> list[str]:

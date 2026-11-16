@@ -273,3 +273,29 @@ def test_disk_full_marks_items_as_errors(kb, monkeypatch):
         assert batch["counts"]["error"] == 1 and "磁盘" in batch["items"][0]["error"]
     finally:
         m.stop()
+
+
+def test_after_save_hook_records_outcome(kb):
+    seen = []
+
+    def after_save(kb_name, pdf):
+        seen.append((kb_name, pdf))
+        if pdf == "b.pdf":
+            raise RuntimeError("FastGPT 不可用")
+        return {"status": "imported", "chunks": 1} if pdf == "a.pdf" else None
+
+    m = BatchManager(lambda pdf, options: fake_result(), 1)
+    m.after_save = after_save
+    m.start()
+    try:
+        created = m.create("库A", ["a.pdf", "b.pdf", "sub/c.pdf"], settings(), skip_converted=False)
+        batch = wait(m, "库A", created["id"])
+    finally:
+        m.stop()
+    by_path = {item["path"]: item for item in batch["items"]}
+    assert sorted(seen) == [("库A", "a.pdf"), ("库A", "b.pdf"), ("库A", "sub/c.pdf")]
+    # 钩子失败不影响解析状态，结果记入 fastgpt
+    assert all(item["status"] == "done" for item in by_path.values())
+    assert by_path["a.pdf"]["fastgpt"] == {"status": "imported", "chunks": 1}
+    assert by_path["b.pdf"]["fastgpt"]["status"] == "error" and "不可用" in by_path["b.pdf"]["fastgpt"]["message"]
+    assert "fastgpt" not in by_path["sub/c.pdf"]

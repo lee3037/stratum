@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react"
-import { ChevronRight, LoaderCircle, Plus, Search } from "lucide-react"
+import { ChevronRight, LoaderCircle, Search } from "lucide-react"
 
 import type { FastgptDataset, KbSummary } from "@/lib/library"
 import { createKb, fastgptStatus, kbFromDataset, listDatasets, listKbs } from "@/lib/library"
@@ -23,28 +23,32 @@ const fail = (title: string, e: unknown) =>
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+const stats = (kb: KbSummary) => `${kb.pdfs} 个 PDF · 已转换 ${kb.converted} · ${ago(kb.updated)}`
+
 /** 列表超过这个数量时显示搜索框 */
 const SEARCH_THRESHOLD = 6
 
 interface FastgptInfo {
-  configured: boolean
-  datasets: FastgptDataset[]
+  /** null：还在读取 FastGPT 状态 */
+  configured: boolean | null
+  datasets: FastgptDataset[] | null
   error: string | null
 }
 
 /**
- * 首页：服务器上的知识库，以及 FastGPT 中还没有对应 Stratum 知识库的知识库。
- * 点击已有知识库直接进入；点击 FastGPT 知识库会新建同名知识库、完成绑定后进入。
+ * 首页。配置了 FastGPT 时，列表就是 FastGPT 中的知识库：点击进入，第一次进入时服务端自动准备
+ * 存放 PDF 与 Markdown 的目录并绑定，用户无需感知。没有配置 FastGPT（或读取失败）时，
+ * 显示服务器上的知识库并允许手动新建。
  */
 export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }) {
   const [kbs, setKbs] = useState<KbSummary[] | null>(null)
-  const [fastgpt, setFastgpt] = useState<FastgptInfo>({ configured: false, datasets: [], error: null })
+  const [fastgpt, setFastgpt] = useState<FastgptInfo>({ configured: null, datasets: null, error: null })
   const [storageError, setStorageError] = useState<string | null>(null)
   const [chineseName, setChineseName] = useState(false)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState("")
   const [query, setQuery] = useState("")
-  /** 正在打开或创建的条目（知识库名或 FastGPT 知识库 id） */
+  /** 正在进入的条目（知识库名或 FastGPT 知识库 id） */
   const [pendingId, setPendingId] = useState<string | null>(null)
   const busy = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -62,33 +66,48 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
     )
     fastgptStatus()
       .then(async (s) => {
-        if (!s.configured) return
-        setFastgpt({ configured: true, datasets: [], error: null })
+        if (!s.configured) return setFastgpt({ configured: false, datasets: null, error: null })
+        setFastgpt({ configured: true, datasets: null, error: null })
         try {
           setFastgpt({ configured: true, datasets: await listDatasets(), error: null })
         } catch (e) {
-          setFastgpt({ configured: true, datasets: [], error: message(e) })
+          setFastgpt({ configured: true, datasets: null, error: message(e) })
         }
       })
-      .catch(() => { /* 读不到状态时按未配置处理 */ })
+      .catch(() => setFastgpt({ configured: false, datasets: null, error: null }))
   }, [])
 
-  const list = kbs ?? []
-  const loaded = kbs !== null
-  const bound = useMemo(() => new Set(list.map((kb) => kb.fastgpt?.dataset_id).filter(Boolean)), [list])
-  const unbound = fastgpt.datasets.filter((ds) => !bound.has(ds.id))
-  const total = list.length + unbound.length
-  const formOpen = creating || (loaded && total === 0)
+  const datasets = fastgpt.datasets
+  /** 以 FastGPT 为准：配置了且读到了列表 */
+  const synced = datasets !== null
+  const loaded = kbs !== null && fastgpt.configured !== null && !(fastgpt.configured && !synced && !fastgpt.error)
+
+  // 每个 FastGPT 知识库对应的服务器目录（第一个绑定它的）；其余目录归入「其他」
+  const { byDataset, others } = useMemo(() => {
+    const ids = new Set((datasets ?? []).map((ds) => ds.id))
+    const map = new Map<string, KbSummary>()
+    const rest: KbSummary[] = []
+    for (const kb of kbs ?? []) {
+      const id = kb.fastgpt?.dataset_id
+      if (synced && id && ids.has(id) && !map.has(id)) map.set(id, kb)
+      else rest.push(kb)
+    }
+    return { byDataset: map, others: rest }
+  }, [kbs, datasets, synced])
+
+  const total = (datasets?.length ?? 0) + others.length
+  // 手动新建只在不以 FastGPT 为准时提供；以 FastGPT 为准时请在 FastGPT 中新建
+  const canCreate = loaded && !synced
+  const formOpen = canCreate && (creating || total === 0)
 
   useEffect(() => {
     if (creating) inputRef.current?.focus()
   }, [creating])
 
   const q = query.trim().toLowerCase()
-  const shownKbs = q
-    ? list.filter((kb) => kb.name.toLowerCase().includes(q) || kb.fastgpt?.dataset_name?.toLowerCase().includes(q))
-    : list
-  const shownDatasets = q ? unbound.filter((ds) => ds.name.toLowerCase().includes(q)) : unbound
+  const match = (...names: (string | null | undefined)[]) => !q || names.some((n) => n?.toLowerCase().includes(q))
+  const shownDatasets = (datasets ?? []).filter((ds) => match(ds.name, byDataset.get(ds.id)?.name))
+  const shownOthers = others.filter((kb) => match(kb.name, kb.fastgpt?.dataset_name))
 
   const run = async (id: string, task: () => Promise<void>) => {
     if (busy.current) return
@@ -104,15 +123,18 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
 
   const open = (kb: string) => run(kb, () => onOpen(kb).catch((e) => fail("无法打开知识库", e)))
 
-  const openDataset = (ds: FastgptDataset) =>
-    run(ds.id, async () => {
+  const openDataset = (ds: FastgptDataset) => {
+    const kb = byDataset.get(ds.id)
+    if (kb) return open(kb.name)
+    return run(ds.id, async () => {
       try {
-        const { name: kb } = await kbFromDataset(ds.id)
-        await onOpen(kb)
+        const { name: folder } = await kbFromDataset(ds.id)
+        await onOpen(folder)
       } catch (e) {
-        fail(`无法为「${ds.name}」创建知识库`, e)
+        fail(`无法打开「${ds.name}」`, e)
       }
     })
+  }
 
   const create = (e: FormEvent) => {
     e.preventDefault()
@@ -130,9 +152,17 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
 
   const meta = !loaded
     ? "加载中"
-    : unbound.length
-      ? `${list.length} 个知识库 · FastGPT 中另有 ${unbound.length} 个可直接创建`
-      : `共 ${list.length} 个知识库`
+    : synced
+      ? `与 FastGPT 同步 · 共 ${datasets?.length ?? 0} 个知识库`
+      : `共 ${others.length} 个知识库`
+
+  const otherTag = (kb: KbSummary): ReactNode => {
+    if (!kb.fastgpt) return fastgpt.configured ? <span className="text-amber-700 dark:text-amber-400">未绑定 FastGPT</span> : null
+    if (!synced) return <span className="truncate">FastGPT · {kb.fastgpt.dataset_name ?? kb.fastgpt.dataset_id}</span>
+    return byDataset.get(kb.fastgpt.dataset_id)
+      ? <span className="truncate">与「{byDataset.get(kb.fastgpt.dataset_id)!.name}」绑定同一个 FastGPT 知识库</span>
+      : <span className="text-amber-700 dark:text-amber-400">FastGPT 中找不到绑定的知识库</span>
+  }
 
   return (
     <div className="flex min-h-svh flex-col items-center bg-muted/30 px-4 pt-14 pb-10">
@@ -162,7 +192,7 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
           meta={meta}
           title="知识库"
           toolbar={
-            !formOpen && (
+            canCreate && !formOpen && (
               <EmptyAction className="h-8 px-3 text-[13.5px]" emphasis="secondary" icon={<IconPlus />} onClick={() => setCreating(true)}>
                 新建知识库
               </EmptyAction>
@@ -176,7 +206,7 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
                 className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 maxLength={64}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="新知识库名称，建议与 FastGPT 中的知识库同名"
+                placeholder="新知识库名称"
                 ref={inputRef}
                 value={name}
               />
@@ -210,65 +240,65 @@ export function KbPicker({ onOpen }: { onOpen: (name: string) => Promise<void> }
               backdrop="stack"
               className="px-5 py-10"
               description={
-                fastgpt.configured
-                  ? "在上方输入名称新建。每个知识库对应 FastGPT 中的一个知识库，PDF 和解析结果都保存在服务器上。"
-                  : "在上方输入名称新建。PDF 和解析结果都保存在服务器上；管理员配置 FastGPT 后，这里还会列出 FastGPT 中的知识库。"
+                synced
+                  ? "FastGPT 中还没有这个 API 密钥能访问的知识库。请先在 FastGPT 中新建知识库，再刷新本页。"
+                  : "在上方输入名称新建。PDF 和解析结果都保存在服务器上；管理员配置 FastGPT 后，这里直接列出 FastGPT 中的知识库。"
               }
               icon={<IconFolder />}
               title="还没有知识库"
             />
           ) : (
             <div className="max-h-[min(60vh,560px)] overflow-y-auto py-1">
-              {shownKbs.length > 0 && (
-                <Group label={unbound.length ? "已创建" : undefined}>
-                  {shownKbs.map((kb) => (
+              {shownDatasets.length > 0 && (
+                <Group>
+                  {shownDatasets.map((ds) => {
+                    const kb = byDataset.get(ds.id)
+                    return (
+                      <Row
+                        busy={pendingId === ds.id || (kb !== undefined && pendingId === kb.name)}
+                        detail={kb ? stats(kb) : "还没有上传 PDF"}
+                        disabled={pendingId !== null}
+                        key={ds.id}
+                        muted={!kb}
+                        name={ds.name}
+                        onClick={() => void openDataset(ds)}
+                        tag={ds.vector_model ?? undefined}
+                      />
+                    )
+                  })}
+                </Group>
+              )}
+              {shownOthers.length > 0 && (
+                <Group label={synced ? "服务器上的其他知识库" : undefined}>
+                  {shownOthers.map((kb) => (
                     <Row
                       busy={pendingId === kb.name}
-                      detail={`${kb.pdfs} 个 PDF · 已转换 ${kb.converted} · ${ago(kb.updated)}`}
+                      detail={stats(kb)}
                       disabled={pendingId !== null}
                       key={kb.name}
                       name={kb.name}
                       onClick={() => void open(kb.name)}
-                      tag={
-                        kb.fastgpt ? (
-                          <span className="truncate" title={`已绑定 FastGPT 知识库「${kb.fastgpt.dataset_name ?? kb.fastgpt.dataset_id}」`}>
-                            {kb.fastgpt.dataset_name && kb.fastgpt.dataset_name !== kb.name
-                              ? `FastGPT · ${kb.fastgpt.dataset_name}`
-                              : "已绑定 FastGPT"}
-                          </span>
-                        ) : fastgpt.configured ? (
-                          <span className="text-amber-700 dark:text-amber-400">未绑定 FastGPT</span>
-                        ) : null
-                      }
+                      tag={otherTag(kb)}
                     />
                   ))}
                 </Group>
               )}
-              {shownDatasets.length > 0 && (
-                <Group label="FastGPT 中的知识库 · 点击自动创建同名知识库并绑定">
-                  {shownDatasets.map((ds) => (
-                    <Row
-                      busy={pendingId === ds.id}
-                      detail={ds.vector_model ? `FastGPT 知识库 · ${ds.vector_model}` : "FastGPT 知识库"}
-                      disabled={pendingId !== null}
-                      key={ds.id}
-                      muted
-                      name={ds.name}
-                      onClick={() => void openDataset(ds)}
-                      tag={<span className="inline-flex items-center gap-1"><Plus className="size-3.5" />创建并打开</span>}
-                    />
-                  ))}
-                </Group>
-              )}
-              {q && shownKbs.length + shownDatasets.length === 0 && (
+              {q && shownDatasets.length + shownOthers.length === 0 && (
                 <p className="px-4 py-8 text-center text-sm text-muted-foreground">没有匹配「{query.trim()}」的知识库</p>
               )}
             </div>
           )}
 
-          {fastgpt.error && (
-            <p className="border-t border-border px-4 py-2.5 text-[13px] text-red-700 dark:text-red-300">
-              无法读取 FastGPT 知识库列表：{fastgpt.error}
+          {loaded && (synced || fastgpt.error) && (
+            <p
+              className={cn(
+                "border-t border-border px-4 py-2.5 text-[13px]",
+                fastgpt.error ? "text-red-700 dark:text-red-300" : "text-muted-foreground",
+              )}
+            >
+              {fastgpt.error
+                ? `无法读取 FastGPT 知识库列表：${fastgpt.error}。暂时显示服务器上的知识库。`
+                : "列表来自 FastGPT。需要新的知识库时，先在 FastGPT 中新建，再刷新本页。"}
             </p>
           )}
         </EmptyPanel>
@@ -306,7 +336,7 @@ function Row({ name, detail, tag, muted, busy, disabled, onClick }: {
         <span
           className={cn(
             "grid size-9 shrink-0 place-items-center rounded-xl border border-border [&_svg]:size-[18px]",
-            muted ? "border-dashed text-muted-foreground" : "bg-background text-foreground",
+            muted ? "text-muted-foreground" : "bg-background text-foreground",
           )}
         >
           {busy ? <LoaderCircle className="animate-spin" /> : <IconFolder />}

@@ -1,6 +1,8 @@
 """表格清洗、跨页合并与 Markdown / 键值渲染。"""
 from __future__ import annotations
 
+import re
+
 from .textutil import clean_text, join_lines, strip_key
 
 
@@ -80,8 +82,9 @@ def _merge_two_header_rows(rows: list[list[str]]) -> list[list[str]]:
 
 
 def normalize_table(raw_rows, ocr: bool = False, col_x: list | None = None,
-                    explicit_grid: bool = False, header_rows: int = 1) -> dict | None:
-    """清洗表格；HTML 网格按明确的 header_rows 合并表头，不猜测数据列。"""
+                    explicit_grid: bool = False, header_rows: int = 1, min_rows: int = 2) -> dict | None:
+    """清洗表格；HTML 网格按明确的 header_rows 合并表头，不猜测数据列。
+    min_rows=1 时允许只有表头（页底被分页截断的表头，等着与下一页的续表合并）。"""
     if not raw_rows:
         return None
     width = max(len(r) for r in raw_rows)
@@ -100,13 +103,70 @@ def normalize_table(raw_rows, ocr: bool = False, col_x: list | None = None,
         rows, xs = _drop_empty(rows, xs)
     if not rows:
         return None
-    if not explicit_grid:
+    # 只有一行（表头）时无法判断哪些列是重复或错拆的，不做列合并
+    if not explicit_grid and len(rows) > 1:
         rows, xs = _merge_complementary_columns(rows, xs)
         rows, xs = _drop_duplicate_columns(rows, xs)
         rows = _merge_header_rows(rows)
-    if len(rows) < 2 or len(rows[0]) < 2:
+    if len(rows) < min_rows or len(rows[0]) < 2:
         return None
     return {"header": rows[0], "rows": rows[1:], "col_x": xs if all(x is not None for x in xs) else None}
+
+
+def split_sections(raw_rows, hspan, col_x: list | None = None, ocr: bool = False) -> list[dict]:
+    """一个框线表格内用通栏标题行（一个单元格横跨整行）隔开的几张小表，拆开分别处理。
+
+    返回 [{"title", "rows", "col_x"}]：title 为该段之前的通栏标题（多行用 · 连接，可能为空），
+    rows 只保留该段真正用到的列——在该段每一行都被横向覆盖的列，是其他小表的列边界带来的。"""
+    if not raw_rows or not hspan or len(hspan) != len(raw_rows):
+        return [{"title": "", "rows": raw_rows, "col_x": col_x}]
+    width = len(raw_rows[0])
+
+    def full_width(i):
+        return width > 1 and bool(str(raw_rows[i][0] or "").strip()) and all(hspan[i][1:])
+
+    groups: list[tuple[list[str], list, list]] = []
+    titles: list[str] = []
+    rows: list = []
+    spans: list = []
+    for i, row in enumerate(raw_rows):
+        if full_width(i):
+            if rows:
+                groups.append((titles, rows, spans))
+                titles, rows, spans = [], [], []
+            titles.append(_title_text(row[0], ocr))
+        else:
+            rows.append(row)
+            spans.append(hspan[i])
+    if rows or titles:
+        groups.append((titles, rows, spans))
+    out = []
+    for titles, rows, spans in groups:
+        keep = [j for j in range(width) if not all(h[j] for h in spans)] if rows else []
+        out.append({
+            "title": " · ".join(t for t in titles if t),
+            "rows": [[r[j] for j in keep] for r in rows],
+            "col_x": [col_x[j] for j in keep] if col_x and len(col_x) == width else None,
+        })
+    return out
+
+
+_CJK_CHAR = re.compile(r"^[\u4e00-\u9fff]$")
+
+
+def _title_text(value, ocr: bool) -> str:
+    """通栏标题：逐字留白排版的汉字（“油 品 更 换 标 准”）连起来，其余留白保留为空格。"""
+    # 先按留白切开再逐段清洗：clean_text 会去掉汉字之间的空格
+    tokens = [t for t in (_clean_cell(part, ocr) for part in str(value or "").split()) if t]
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        single = bool(_CJK_CHAR.match(tok))
+        prev_single = i > 0 and bool(_CJK_CHAR.match(tokens[i - 1]))
+        if out and single and prev_single:
+            out[-1] += tok
+        else:
+            out.append(tok)
+    return " ".join(out)
 
 
 def table_as_text(raw_rows, ocr: bool = False) -> str:
@@ -168,6 +228,11 @@ def merge_tables(t1: dict, t2: dict) -> dict:
     pages2 = [t2["row_pages"][0] if t2.get("row_pages") else None] + list(t2.get("row_pages") or [None] * len(t2["rows"]))
     if same_header(t1["header"], rows2[0]):
         rows2, pages2 = rows2[1:], pages2[1:]
+    header = t1["header"]
+    if not t1["rows"] and rows2:
+        # t1 只有表头（表头行被分页截断）：t2 首行是表头的下半部分，逐列拼回
+        header = [join_lines([x, y]) if y and y != x else x for x, y in zip(header, rows2[0])]
+        rows2, pages2 = rows2[1:], pages2[1:]
     rows = list(t1["rows"])
     pages = list(t1.get("row_pages") or [None] * len(rows))
     if rows and rows2:
@@ -187,7 +252,7 @@ def merge_tables(t1: dict, t2: dict) -> dict:
             for j in range(lead):
                 r[j] = prev[j]
             prev = r
-    return {"header": t1["header"], "rows": rows + rows2, "row_pages": pages + pages2, "col_x": t1.get("col_x")}
+    return {"header": header, "rows": rows + rows2, "row_pages": pages + pages2, "col_x": t1.get("col_x")}
 
 
 def _esc(cell: str) -> str:

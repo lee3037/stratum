@@ -73,6 +73,39 @@ def test_table_normalize_and_merge():
     assert T.render_markdown(["a|b", "c"], [["1", "2"]]).splitlines()[0] == "| a\\|b | c |"
 
 
+def test_table_sections_split_on_full_width_rows():
+    # 一个框线表格内两张小表：通栏标题隔开，第二张的列边界多出来，合并单元格横向填充
+    rows = [
+        ["设备名称：门机 设备编号：B1", "设备名称：门机 设备编号：B1", "设备名称：门机 设备编号：B1", "设备名称：门机 设备编号：B1"],
+        ["油 品 更 换 标 准", "油 品 更 换 标 准", "油 品 更 换 标 准", "油 品 更 换 标 准"],
+        ["机构", "部位", "部位", "周期"],
+        ["起升", "减速箱", "减速箱", "60"],
+        ["滤 芯 更 换", "滤 芯 更 换", "滤 芯 更 换", "滤 芯 更 换"],
+        ["机构", "名称", "数量", "周期"],
+        ["供料", "滤芯", "1个", "48月"],
+    ]
+    F, T_ = False, True
+    hspan = [[F, T_, T_, T_], [F, T_, T_, T_], [F, F, T_, F], [F, F, T_, F],
+             [F, T_, T_, T_], [F, F, F, F], [F, F, F, F]]
+    secs = T.split_sections(rows, hspan, [10, 20, 30, 40])
+    assert [s["title"] for s in secs] == ["设备名称：门机 设备编号：B1 · 油品更换标准", "滤芯更换"]
+    assert secs[0]["rows"] == [["机构", "部位", "周期"], ["起升", "减速箱", "60"]] and secs[0]["col_x"] == [10, 20, 40]
+    assert secs[1]["rows"][0] == ["机构", "名称", "数量", "周期"]
+    # 没有横向覆盖信息（版面识别的表格）：原样返回
+    assert T.split_sections(rows, None) == [{"title": "", "rows": rows, "col_x": None}]
+
+
+def test_header_cut_by_page_break_is_joined():
+    # 页底只剩表头上半部分（“保养”），下一页首行是下半部分（“级别”）
+    top = T.normalize_table([["保养", "保养", "保养内容", "保养"]], min_rows=1)
+    assert top == {"header": ["保养", "保养", "保养内容", "保养"], "rows": [], "col_x": None}
+    assert T.normalize_table([["保养", "保养", "保养内容", "保养"]]) is None  # 默认至少两行
+    nxt = T.normalize_table([["级别", "项目", "", "周期"], ["例保", "清洁", "清理地面", "当班"]])
+    merged = T.merge_tables({**top, "row_pages": []}, {**nxt, "row_pages": [13]})
+    assert merged["header"] == ["保养级别", "保养项目", "保养内容", "保养周期"]
+    assert merged["rows"] == [["例保", "清洁", "清理地面", "当班"]]
+
+
 def test_long_table_split_repeats_header():
     rows = [[str(i), f"设备-{i:03d}", "服务器"] for i in range(200)]
     els = [{"type": "heading", "text": "清单", "level": 1, "pages": [1, 1]},

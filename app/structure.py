@@ -478,18 +478,26 @@ def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
         close_flow()
         base = {"pages": [page, page], "bbox": b["bbox"], "pw": b["pw"], "ph": b["ph"], "ocr": b["ocr"]}
         if cls == "table":
-            raw = (b["table"] or {}).get("rows")
+            tab = b["table"] or {}
+            raw = tab.get("rows")
             if _is_toc_table(raw):
                 stats["toc_removed"] = stats.get("toc_removed", 0) + 1
                 continue
-            t = T.normalize_table(raw, b["ocr"], (b["table"] or {}).get("col_x"))
-            if t:
-                elements.append({"type": "table", **t, "row_pages": [page] * len(t["rows"]), **base})
-                stats["tables"] += 1
-            else:
-                txt = T.table_as_text(raw, b["ocr"])
-                if txt:
-                    elements.append({"type": "paragraph", "text": txt.replace("\n", " "), "role": None, **base})
+            # 框线表格内的通栏标题行把它分成几张小表：标题作为表名，各表只保留自己的列
+            sections = T.split_sections(raw, tab.get("hspan"), tab.get("col_x"), b["ocr"])
+            for k, sec in enumerate(sections):
+                # 拆出的最后一张小表只剩表头：多半是表头被分页截断，保留为只有表头的表格，与下一页的续表合并
+                header_only = len(sections) > 1 and k == len(sections) - 1 and len(sec["rows"]) == 1
+                t = T.normalize_table(sec["rows"], b["ocr"], sec["col_x"], min_rows=1 if header_only else 2) if sec["rows"] else None
+                if sec["title"]:
+                    elements.append({"type": "paragraph", "text": sec["title"], "role": "caption" if t else None, **base})
+                if t:
+                    elements.append({"type": "table", **t, "row_pages": [page] * len(t["rows"]), **base})
+                    stats["tables"] += 1
+                elif sec["rows"]:
+                    txt = T.table_as_text(sec["rows"], b["ocr"])
+                    if txt:
+                        elements.append({"type": "paragraph", "text": txt.replace("\n", " "), "role": None, **base})
             continue
         if not text:
             continue

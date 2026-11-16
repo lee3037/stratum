@@ -174,7 +174,8 @@ class _PageChars:
         for block in raw["blocks"]:
             for line in block.get("lines", []):
                 chars = [
-                    (ch["c"], (ch["bbox"][0] + ch["bbox"][2]) / 2, (ch["bbox"][1] + ch["bbox"][3]) / 2)
+                    (ch["c"], (ch["bbox"][0] + ch["bbox"][2]) / 2, (ch["bbox"][1] + ch["bbox"][3]) / 2,
+                     ch["bbox"][0], ch["bbox"][2])
                     for span in line["spans"]
                     if not drop_invisible or _span_visible(span)
                     for ch in span["chars"]
@@ -182,48 +183,65 @@ class _PageChars:
                 if chars and line["dir"][0] > 0.9:
                     self.lines.append((line["bbox"], chars))
 
-    def text_in(self, rect) -> str:
+    def text_in(self, rect, keep_gaps: bool = False) -> str:
+        """keep_gaps：相邻两字之间留白超过约半个字高时补一个空格，
+        用于通栏标题这类靠留白分隔多项内容的单元格。"""
         x0, y0, x1, y1 = rect
         found = []
         for lb, chars in self.lines:
             if lb[3] < y0 or lb[1] > y1 or lb[2] < x0 or lb[0] > x1:
                 continue
-            sel = [c for c, cx, cy in chars if x0 <= cx <= x1 and y0 <= cy <= y1]
+            sel = [ch for ch in chars if x0 <= ch[1] <= x1 and y0 <= ch[2] <= y1]
             if sel:
-                found.append((lb[1], lb[0], "".join(sel)))
+                found.append((lb[1], sel[0][3], sel, lb[3] - lb[1]))
         found.sort(key=lambda t: (round(t[0] / 3), t[1]))
         # 同一视觉行的多个片段先拼起来
         merged: list[list] = []
-        for y, x, t in found:
+        for y, _x, sel, height in found:
             if merged and abs(merged[-1][0] - y) < 3:
-                merged[-1][1] += t
+                merged[-1][1].extend(sel)
             else:
-                merged.append([y, t])
-        return "\n".join(t for _, t in merged)
+                merged.append([y, list(sel), height])
+        out = []
+        for _y, sel, height in merged:
+            text, prev_x1 = [], None
+            for c, _cx, _cy, cx0, cx1 in sel:
+                if keep_gaps and prev_x1 is not None and c != " " and text and text[-1] != " " and cx0 - prev_x1 > 0.5 * height:
+                    text.append(" ")
+                text.append(c)
+                prev_x1 = cx1
+            out.append("".join(text))
+        return "\n".join(out)
 
 
-def _grid_from_lines_table(tab, chars: _PageChars) -> list[list[str]] | None:
-    """把 find_tables 结果转成完整网格，合并单元格的内容填充到其覆盖的所有格子。"""
+def _grid_from_lines_table(tab, chars: _PageChars):
+    """把 find_tables 结果转成完整网格，合并单元格的内容填充到其覆盖的所有格子。
+
+    返回 (网格, 列左边界, hspan)。hspan[r][c] 为 True 表示该格被左侧的合并单元格横向覆盖，
+    不是独立的值（同一框线内的几张小表列结构不同，靠它去掉多出来的列）。"""
     rows = tab.rows
     if not rows:
-        return None, None
+        return None, None, None
     xs = _cluster([c[0] for r in rows for c in r.cells if c])
     ys = _cluster([c[1] for r in rows for c in r.cells if c])
     nrows, ncols = len(rows), max(len(r.cells) for r in rows)
     grid: list[list[str | None]] = [[None] * ncols for _ in range(nrows)]
+    hspan = [[False] * ncols for _ in range(nrows)]
     for ri, row in enumerate(rows):
         for ci, cell in enumerate(row.cells):
             if cell is None:
                 continue
-            text = chars.text_in(cell)
             x0, y0, x1, y1 = cell
             nspan_c = max(1, sum(1 for x in xs if x0 - 1.5 <= x < x1 - 1.5))
+            # 横跨整行的单元格多为通栏标题，保留各项之间的留白
+            text = chars.text_in(cell, keep_gaps=ncols > 1 and nspan_c >= ncols)
             nspan_r = max(1, sum(1 for y in ys if y0 - 1.5 <= y < y1 - 1.5))
             for rr in range(ri, min(ri + nspan_r, nrows)):
                 for cc in range(ci, min(ci + nspan_c, ncols)):
                     if grid[rr][cc] is None:
                         grid[rr][cc] = text
-    return [[c or "" for c in row] for row in grid], xs[:ncols] if len(xs) >= ncols else None
+                        hspan[rr][cc] = cc > ci
+    return [[c or "" for c in row] for row in grid], xs[:ncols] if len(xs) >= ncols else None, hspan
 
 
 def _lines_table(page, rect, cache: dict):
@@ -243,7 +261,7 @@ def _lines_table(page, rect, cache: dict):
     if "chars" not in cache:
         cache["chars"] = _PageChars(page, cache.get("drop_invisible", False))
     res = _grid_from_lines_table(best, cache["chars"])
-    return (res[0], list(best.bbox), res[1]) if res and res[0] else None
+    return (res[0], list(best.bbox), res[1], res[2]) if res and res[0] else None
 
 
 def _fill_empty_ocr_cells(page, rows, cells, limit=150):
@@ -308,7 +326,7 @@ def _convert_page(doc, pl, ocr_pages) -> dict:
             else:
                 hit = _lines_table(page, b["bbox"], cache)
                 if hit:
-                    tab = {"rows": hit[0], "source": "lines", "col_x": hit[2]}
+                    tab = {"rows": hit[0], "source": "lines", "col_x": hit[2], "hspan": hit[3]}
                     b["bbox"] = [round(v, 2) for v in hit[1]]
                 elif drop_invisible and box.table.get("cells"):
                     if "chars" not in cache:

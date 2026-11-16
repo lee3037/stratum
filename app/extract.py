@@ -13,6 +13,8 @@ import os
 
 import pymupdf
 
+from . import images
+
 _OCR_PAGES: set[int] = set()
 _OCR_FUNC = None
 _FORCE_OCR = False
@@ -298,7 +300,7 @@ def _fill_empty_ocr_cells(page, rows, cells, limit=150):
     return filled
 
 
-def _convert_page(doc, pl, ocr_pages) -> dict:
+def _convert_page(doc, pl, ocr_pages, image_dir: str | None = None) -> dict:
     page_index = pl.page_number - 1
     # 可见文字充足、又叠加了一层不可见文字（旧 OCR 层）时，丢弃不可见文字，避免内容重复和错字
     page = doc[page_index]
@@ -337,6 +339,17 @@ def _convert_page(doc, pl, ocr_pages) -> dict:
             ln = _line_from_spans(line, drop_invisible)
             if ln:
                 b["lines"].append(ln)
+        if box.boxclass == "picture":
+            # 带照片的步骤表常被整体识别为图片：有框线表格时同时取出表格文字，便于检索
+            if page_index not in ocr_pages and sum(len(l["text"].strip()) for l in b["lines"]) >= 20:
+                hit = _lines_table(page, b["bbox"], cache)
+                if hit:
+                    b["table"] = {"rows": hit[0], "source": "lines", "col_x": hit[2], "hspan": hit[3]}
+            if image_dir:
+                try:
+                    b["image"] = images.save_region(page, b["bbox"], image_dir)
+                except Exception:  # noqa: BLE001  单张图片失败不影响整页
+                    b["image"] = None
         out_boxes.append(b)
     return {
         "number": pl.page_number,
@@ -348,8 +361,9 @@ def _convert_page(doc, pl, ocr_pages) -> dict:
     }
 
 
-def extract_pages(path: str, pages: list[int], ocr_mode: str = "auto", ocr_dpi: int = 200) -> list[dict]:
-    """解析指定页（0 基）。在工作进程中调用。"""
+def extract_pages(path: str, pages: list[int], ocr_mode: str = "auto", ocr_dpi: int = 200,
+                  image_dir: str | None = None) -> list[dict]:
+    """解析指定页（0 基）。在工作进程中调用。image_dir：保存图片区域的目录，None 表示不提取图片。"""
     if _OCR_FUNC is None and ocr_mode != "off":
         worker_init()
     global _FORCE_OCR
@@ -360,7 +374,7 @@ def extract_pages(path: str, pages: list[int], ocr_mode: str = "auto", ocr_dpi: 
         raise ValueError("PDF 已加密，无法读取")
     with contextlib.redirect_stdout(io.StringIO()):
         parsed = _parse(doc, pages, ocr_mode, ocr_dpi)
-    result = [_convert_page(doc, pl, set(_OCR_PAGES)) for pl in parsed.pages]
+    result = [_convert_page(doc, pl, set(_OCR_PAGES), image_dir) for pl in parsed.pages]
     doc.close()
     return result
 

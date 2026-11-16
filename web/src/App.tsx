@@ -27,6 +27,7 @@ const sameExceptSeparator = (a: ChunkOptions, b: ChunkOptions) =>
 // 方案不用本地 OCR 参数时忽略它们；目录里查不到方案时按全部参数比较
 const sameConvert = (a: ConvertOptions, b: ConvertOptions, parser?: ParserInfo) =>
   a.parser === b.parser && a.remove_header_footer === b.remove_header_footer &&
+  (a.extract_images ?? true) === (b.extract_images ?? true) &&
   (parser?.local_ocr_options === false ||
     (a.ocr_mode === b.ocr_mode && (a.ocr_mode === "off" || a.ocr_dpi === b.ocr_dpi)))
 

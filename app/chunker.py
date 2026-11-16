@@ -4,11 +4,13 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 
+from . import images
 from . import tables as T
 from .textutil import hard_split
 
 DEFAULT_SEPARATOR = "===CHUNK==="
 CAPTION_RE = re.compile(r"^(表|Table|TABLE|Tab\.)\s*[\dA-Z一二三四五六七八九十]")
+FIG_CAPTION_RE = re.compile(r"^[(（]?\s*(图|Figure|FIGURE|Fig\.)\s*[\dA-Z一二三四五六七八九十]")
 
 
 @dataclass
@@ -58,6 +60,20 @@ def _md_list_lines(items) -> list[str]:
             body = f"{marker} {it['text']}"
         lines.append("    " * it.get("depth", 0) + body)
     return lines
+
+
+def _fig_caption(e) -> str | None:
+    if e is None or e["type"] != "paragraph":
+        return None
+    text = e["text"].strip()
+    if len(text) <= 60 and (FIG_CAPTION_RE.match(text) or (e.get("role") == "caption" and not CAPTION_RE.match(text))):
+        return text
+    return None
+
+
+def md_image(name: str, alt: str) -> str:
+    alt = re.sub(r"[\[\]\n]", " ", alt).strip() or "图片"
+    return f"![{alt}]({images.url_for(name)})"
 
 
 def _fmt_pages(pages) -> str:
@@ -177,6 +193,7 @@ def _section_units(sec, budget, opts) -> list[Unit]:
         e = els[i]
         t = e["type"]
         nxt = els[i + 1] if i + 1 < len(els) else None
+        prv = els[i - 1] if i > 0 else None
         if t == "paragraph":
             text = e["text"]
             is_caption = e.get("role") == "caption" or (
@@ -191,7 +208,7 @@ def _section_units(sec, budget, opts) -> list[Unit]:
             for k, p in enumerate(pieces):
                 last = k == len(pieces) - 1
                 # 引导语（以冒号结尾，或紧挨表格/列表的短句）与后续内容绑定
-                lead_in = nxt is not None and nxt["type"] in ("table", "list") and len(text) <= 120
+                lead_in = nxt is not None and nxt["type"] in ("table", "list", "image") and len(text) <= 120
                 glue = last and (text.rstrip().endswith(("：", ":")) or lead_in)
                 start = text.find(p, cursor)
                 start = cursor if start < 0 else start
@@ -212,6 +229,11 @@ def _section_units(sec, budget, opts) -> list[Unit]:
                 units.append(Unit("\n".join(group), e["pages"], kind="list"))
         elif t == "table":
             units.extend(_table_units(e, "", budget, opts, budget - _glued_size(units)))
+        elif t == "image":
+            # 图题在图下方时与图片绑定在同一块；图题在上方时由引导语规则绑定
+            below = _fig_caption(nxt)
+            alt = below or _fig_caption(prv) or f"图片（第{e['pages'][0]}页）"
+            units.append(Unit(md_image(e["name"], alt), e["pages"], glue=below is not None, kind="image"))
         elif t == "code":
             for piece in hard_split(e["text"], max(budget - 10, 50)) if len(e["text"]) > budget else [e["text"]]:
                 # 正文含反引号时用更长围栏，避免把代码内容误作结束标记。
@@ -378,6 +400,10 @@ def to_markdown(elements, opts: ChunkOptions) -> dict:
     clash = sum(t.count(sep) for t in texts)
     if clash:
         warnings.append(f"原文中出现了 {clash} 处与分隔符相同的文本，导入时会被误切分，建议更换分隔符。")
+    n_images = sum(1 for e in elements if e["type"] == "image")
+    if n_images and not images.public_base():
+        warnings.append(f"文档含 {n_images} 张图片，但未配置 STRATUM_PUBLIC_URL，图片链接是相对地址，"
+                        "导入 FastGPT 后无法显示。")
     over = [i + 1 for i, t in enumerate(texts) if len(t) > opts.max_chars]
     if over:
         warnings.append(f"{len(over)} 个块超过最大字数（单行/单条内容无法再拆），序号：{', '.join(map(str, over[:20]))}")

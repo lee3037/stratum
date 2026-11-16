@@ -8,6 +8,8 @@ export interface ConvertOptions {
   ocr_mode: OcrMode
   ocr_dpi: number
   remove_header_footer: boolean
+  /** 保存 PDF 中的图片，在 Markdown 中以链接引用 */
+  extract_images: boolean
 }
 
 export interface ChunkOptions {
@@ -64,6 +66,7 @@ export const DEFAULT_CONVERT: ConvertOptions = {
   ocr_mode: "auto",
   ocr_dpi: 200,
   remove_header_footer: true,
+  extract_images: true,
 }
 
 export const DEFAULT_CHUNK: ChunkOptions = {

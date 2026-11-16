@@ -14,6 +14,7 @@ class ConvertOptions:
     ocr_mode: str = "auto"  # auto | force | off
     ocr_dpi: int = 200
     remove_header_footer: bool = True
+    extract_images: bool = True  # 保存图片区域并在 Markdown 中引用
     parser: str = "pymupdf"
 
     @classmethod

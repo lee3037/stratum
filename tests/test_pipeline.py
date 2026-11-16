@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pymupdf
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -250,3 +251,107 @@ def test_numbered_headings_lists_and_toc():
     assert "总则 ····" not in md
     assert "| 机构工作级别 | 起升 / 单层缠绕 / 标准钢丝绳 |" in md
     assert all(c["chars"] <= opts.max_chars for c in res["chunks"])
+
+
+# ------------------------------------------------------------ 图片
+
+def _make_figure_pdf(path):
+    doc = pymupdf.open()
+    # 一张有内容的图：渐变+图形
+    src = pymupdf.open(); p0 = src.new_page(width=300, height=200)
+    for i in range(20):
+        p0.draw_rect(pymupdf.Rect(i*15, 0, i*15+15, 200), color=None, fill=(i/20, 0.4, 1-i/20))
+    p0.draw_rect(pymupdf.Rect(0, 140, 300, 200), color=None, fill=(1, 1, 1))
+    p0.draw_circle((150,80), 50, color=(0,0,0), fill=(1,1,0.6), width=3)
+    for k in range(6):
+        p0.draw_line((20 + k * 45, 150), (40 + k * 45, 190), color=(0, 0, 0), width=1.5)
+    photo = p0.get_pixmap(dpi=144).tobytes("png")
+    logo_pg = pymupdf.open(); lp = logo_pg.new_page(width=60, height=30); lp.draw_rect(lp.rect, fill=(0.8,0,0)); lp.insert_text((8,20),"LOGO",fontsize=12,color=(1,1,1))
+    logo = lp.get_pixmap(dpi=144).tobytes("png")
+    for n in range(3):
+        page = doc.new_page(width=595, height=842)
+        page.insert_image(pymupdf.Rect(40, 20, 100, 50), stream=logo)
+        y = 100
+        page.insert_text((72, y), f"第{n+1}章 设备结构", fontname="china-s", fontsize=18); y += 40
+        for k in range(4):
+            page.insert_text((72, y), "本章介绍设备的组成部分与主要结构，检修时应先断电并挂牌上锁，确认无误后再开展作业。", fontname="china-s", fontsize=10.5); y += 18
+        if n == 0:
+            page.insert_image(pymupdf.Rect(147, y+20, 447, y+220), stream=photo)
+            page.insert_text((230, y+240), "图1 设备结构示意图", fontname="china-s", fontsize=10.5)
+            y += 270
+        for k in range(4):
+            page.insert_text((72, y), "检修完成后应清理现场，恢复防护装置，并做好检修记录，由负责人签字确认后方可投入运行。", fontname="china-s", fontsize=10.5); y += 18
+    doc.save(path)
+
+
+def test_picture_filters():
+    from app.images import _skip
+
+    def pix(draw, w=300, h=200):
+        doc = pymupdf.open()
+        page = doc.new_page(width=w, height=h)
+        draw(page)
+        return page.get_pixmap(colorspace=pymupdf.csRGB, alpha=False)
+
+    def gradient(page):
+        for i in range(30):
+            page.draw_rect(pymupdf.Rect(0, i * 7, 300, i * 7 + 7), color=None, fill=(0.55 + i * 0.015, 0.8, 0.95))
+
+    def seal(page):
+        page.draw_circle((150, 100), 80, color=(0.9, 0.1, 0.1), width=6)
+        page.insert_text((105, 105), "STAMP", fontsize=22, color=(0.9, 0.1, 0.1))
+
+    def line_art(page):
+        for k in range(8):
+            page.draw_line((20 + k * 30, 30), (40 + k * 30, 170), color=(0, 0, 0), width=0.8)
+
+    assert _skip(pix(lambda p: None))  # 空白
+    assert _skip(pix(gradient))  # 渐变底图
+    assert _skip(pix(seal))  # 印章
+    assert not _skip(pix(line_art))  # 白底细线图保留
+
+
+def test_pictures_saved_and_linked(tmp_path, monkeypatch):
+    from app import images
+
+    monkeypatch.setenv("STRATUM_DATA_DIR", str(tmp_path / "lib"))
+    monkeypatch.setenv("STRATUM_PUBLIC_URL", "http://10.0.0.5:18080/")
+    pdf = tmp_path / "figs.pdf"
+    _make_figure_pdf(str(pdf))
+    out = convert(str(pdf), ConvertOptions(), ChunkOptions())
+    imgs = [e for e in out["elements"] if e["type"] == "image"]
+    # 正文插图保留；每页页眉的徽标去掉
+    assert len(imgs) == 1 and imgs[0]["pages"] == [1, 1]
+    name = imgs[0]["name"]
+    assert images.path_for(name).is_file()
+    md = out["result"]["markdown"]
+    assert f"![图1 设备结构示意图](http://10.0.0.5:18080/api/images/{name})" in md
+    # 图片与图题在同一块
+    first = chunks_of(md)[0]
+    assert "api/images/" in first and "\n\n图1 设备结构示意图\n\n" in first
+    assert not any("STRATUM_PUBLIC_URL" in w for w in out["result"]["warnings"])
+
+    out = convert(str(pdf), ConvertOptions(extract_images=False), ChunkOptions())
+    assert not any(e["type"] == "image" for e in out["elements"])
+
+
+def test_image_chunk_rendering_and_url_warning(monkeypatch):
+    from app import images
+
+    monkeypatch.delenv("STRATUM_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(images, "_seen_base", "")
+    name = "a" * 40 + ".png"
+    els = [
+        {"type": "heading", "text": "1 概述", "level": 1, "pages": [1, 1]},
+        {"type": "paragraph", "text": "接线如下图所示：", "role": None, "pages": [1, 1]},
+        {"type": "image", "name": name, "width": 100, "height": 80, "pages": [2, 2]},
+    ]
+    r = to_markdown(els, ChunkOptions())
+    assert f"![图片（第2页）](/api/images/{name})" in r["markdown"]
+    assert any("STRATUM_PUBLIC_URL" in w for w in r["warnings"])
+    images.remember_base("http://192.162.10.41:18080/api/kbs")
+    images.remember_base("http://127.0.0.1:8000/api/kbs")  # 本机访问不覆盖
+    r = to_markdown(els, ChunkOptions())
+    assert f"(http://192.162.10.41:18080/api/images/{name})" in r["markdown"]
+    assert not any("STRATUM_PUBLIC_URL" in w for w in r["warnings"])
+    monkeypatch.setattr(images, "_seen_base", "")

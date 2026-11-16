@@ -21,7 +21,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import chunker, exports, extract, fastgpt, parsers, pipeline, storage
+from . import chunker, exports, extract, fastgpt, images, parsers, pipeline, storage
 from .scheduler import BATCH, INTERACTIVE, PriorityPool
 from .batches import BatchManager
 from .storage import StorageError
@@ -92,6 +92,17 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Stratum 层析", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _remember_base(request: Request, call_next):
+    # 未配置 STRATUM_PUBLIC_URL 时，用用户在浏览器中访问 Stratum 的地址生成图片链接
+    if request.url.path.startswith("/api/"):
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        if host:
+            images.remember_base(f"{proto.split(',')[0].strip()}://{host.split(',')[0].strip()}")
+    return await call_next(request)
 
 
 @app.exception_handler(StorageError)
@@ -622,6 +633,18 @@ def start_imports(kb: str, body: ImportJobBody):
 @app.get("/api/kbs/{kb}/fastgpt/imports/{job_id}")
 def get_imports(kb: str, job_id: str):
     return imports.get(kb, job_id)
+
+
+# ---------------------------------------------------------------- 图片
+
+@app.get("/api/images/{name}")
+def get_image(name: str):
+    """PDF 中截取的图片。Markdown 与 FastGPT 中的图片链接指向这里；文件名是内容哈希，可长期缓存。"""
+    path = images.path_for(name)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(path, media_type="image/png" if name.endswith(".png") else "image/jpeg",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 # ---------------------------------------------------------------- 其他

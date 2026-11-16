@@ -137,6 +137,13 @@ export function SettingsPanel(props: SettingsPanelProps) {
           label="去页眉页脚"
           onChange={(v) => setConvert("remove_header_footer", v)}
         />
+        {parser?.local_ocr_options && (
+          <SwitchRow
+            checked={convert.extract_images}
+            label="保存文中图片"
+            onChange={(v) => setConvert("extract_images", v)}
+          />
+        )}
       </Section>
 
       <Section icon={<Layers />} title="分块">

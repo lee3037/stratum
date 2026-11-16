@@ -5,7 +5,7 @@ import math
 from concurrent.futures import Executor, as_completed
 from typing import TYPE_CHECKING
 
-from .. import extract, structure
+from .. import extract, images, structure
 from .base import ParsedDocument, Progress
 
 if TYPE_CHECKING:
@@ -24,18 +24,19 @@ def extract_document(path: str, opts: ConvertOptions, executor: Executor | None 
     if n == 0:
         raise ValueError("PDF 没有页面")
     batches = _batches(n, workers)
+    image_dir = str(images.images_dir()) if getattr(opts, "extract_images", False) else None
     pages: list[dict] = []
     done = 0
     if progress:
         progress(0, n)
     if executor is None:
         for batch in batches:
-            pages += extract.extract_pages(path, batch, opts.ocr_mode, opts.ocr_dpi)
+            pages += extract.extract_pages(path, batch, opts.ocr_mode, opts.ocr_dpi, image_dir)
             done += len(batch)
             if progress:
                 progress(done, n)
     else:
-        futures = {executor.submit(extract.extract_pages, path, batch, opts.ocr_mode, opts.ocr_dpi): batch
+        futures = {executor.submit(extract.extract_pages, path, batch, opts.ocr_mode, opts.ocr_dpi, image_dir): batch
                    for batch in batches}
         for future in as_completed(futures):
             pages += future.result()

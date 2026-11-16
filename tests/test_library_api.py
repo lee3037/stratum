@@ -180,3 +180,27 @@ def test_kb_job_joins_running_and_refuses_batch_files(client, monkeypatch):
     monkeypatch.setattr(server.batches, "active_paths", lambda kb: {"a.pdf": "queued"})
     r = client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf", "options": opts})
     assert r.status_code == 409 and "批量解析" in r.json()["detail"]
+
+
+def test_image_endpoint_and_public_base(client, tmp_path, monkeypatch):
+    from app import images
+
+    monkeypatch.delenv("STRATUM_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(images, "_seen_base", "")
+    name = "b" * 40 + ".png"
+    path = images.path_for(name)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\x89PNG fake")
+    r = client.get(f"/api/images/{name}")
+    assert r.status_code == 200 and r.content == b"\x89PNG fake"
+    assert r.headers["content-type"] == "image/png" and "immutable" in r.headers["cache-control"]
+    for bad in ("../settings.json", "b" * 40 + ".svg", "x.png"):
+        assert client.get(f"/api/images/{bad}").status_code == 404
+    # 图片目录不是知识库
+    assert [k["name"] for k in client.get("/api/kbs").json()["kbs"]] == [KB]
+    # 用户访问 Stratum 的地址用来生成图片链接
+    client.get("/api/kbs", headers={"host": "192.162.10.41:18080"})
+    assert images.public_base() == "http://192.162.10.41:18080"
+    monkeypatch.setenv("STRATUM_PUBLIC_URL", "http://stratum.example:8000/")
+    assert images.url_for(name) == f"http://stratum.example:8000/api/images/{name}"
+    monkeypatch.setattr(images, "_seen_base", "")

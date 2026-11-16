@@ -168,6 +168,15 @@
   vertical-align: top;
 }
 .md th { background: var(--muted); font-weight: 600; text-align: left; }
+.md img {
+  display: block;
+  max-width: 100%;
+  max-height: 28rem;
+  margin: 0.6em 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: white;
+}
 .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
 .md pre { background: var(--muted); border-radius: var(--radius); padding: 0.8em 1em; overflow-x: auto; }
 .md hr.chunk-sep {

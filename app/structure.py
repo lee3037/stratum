@@ -6,6 +6,7 @@
     list:      {"type", "items": [{"text", "marker", "ordered", "depth"}], "pages"}
     table:     {"type", "header", "rows", "pages"}
     code:      {"type", "text", "pages"}
+    image:     {"type", "name", "width", "height", "pages"}（name 为图片库中的文件名）
     formula:   {"type", "text" (LaTeX), "pages"}
 """
 from __future__ import annotations
@@ -107,6 +108,7 @@ def _collect_blocks(pages):
                     "lines": lines,
                     "text": join_lines([l["text"] for l in lines]),
                     "table": box["table"],
+                    "image": box.get("image"),
                     "order": order,
                 }
             )
@@ -133,6 +135,9 @@ def remove_headers_footers(blocks, n_pages, enabled: bool, stats: dict):
         if not drop and b["cls"] != "table" and b["text"] and _in_margin(b["bbox"], b["ph"]):
             if norm_key(b["text"]) in repeated or PAGE_NUM_RE.match(b["text"].strip()):
                 drop = True
+        # 完全落在页边区域内的图片：页眉徽标、页脚装饰
+        if not drop and b["cls"] == "picture" and _in_margin(b["bbox"], b["ph"]):
+            drop = True
         if drop:
             removed += 1
         else:
@@ -455,8 +460,32 @@ def _is_toc_table(raw) -> bool:
     return bool(rows) and sum(1 for r in rows if TOC_LINE_RE.search(r.replace("\n", " ").strip())) >= len(rows) / 2
 
 
+def _skipped_images(blocks) -> set[str]:
+    """不保留的图片：
+    - 在 3 页及以上重复出现的同一张图（徽标、页眉装饰）；
+    - 衬在文字下面的大幅底图（占半页以上，区域内有其他文字块）。"""
+    pages = defaultdict(set)
+    skip = set()
+    for b in blocks:
+        if b["cls"] != "picture" or not b.get("image"):
+            continue
+        name = b["image"]["name"]
+        pages[name].add(b["page"])
+        x0, y0, x1, y1 = b["bbox"]
+        if (x1 - x0) * (y1 - y0) >= 0.5 * b["pw"] * b["ph"]:
+            for o in blocks:
+                if o is b or o["page"] != b["page"] or o["cls"] == "picture" or not o["text"]:
+                    continue
+                cx, cy = (o["bbox"][0] + o["bbox"][2]) / 2, (o["bbox"][1] + o["bbox"][3]) / 2
+                if x0 <= cx <= x1 and y0 <= cy <= y1:
+                    skip.add(name)
+                    break
+    return skip | {name for name, pg in pages.items() if len(pg) >= 3}
+
+
 def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
     elements = []
+    repeated_images = _skipped_images(blocks)
     flow: _Flow | None = None
 
     def close_flow():
@@ -464,6 +493,24 @@ def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
         if flow is not None:
             elements.extend(flow.build())
         flow = None
+
+    def emit_table(b, tab, base):
+        page, raw = b["page"], tab.get("rows")
+        # 框线表格内的通栏标题行把它分成几张小表：标题作为表名，各表只保留自己的列
+        sections = T.split_sections(raw, tab.get("hspan"), tab.get("col_x"), b["ocr"])
+        for k, sec in enumerate(sections):
+            # 拆出的最后一张小表只剩表头：多半是表头被分页截断，保留为只有表头的表格，与下一页的续表合并
+            header_only = len(sections) > 1 and k == len(sections) - 1 and len(sec["rows"]) == 1
+            t = T.normalize_table(sec["rows"], b["ocr"], sec["col_x"], min_rows=1 if header_only else 2) if sec["rows"] else None
+            if sec["title"]:
+                elements.append({"type": "paragraph", "text": sec["title"], "role": "caption" if t else None, **base})
+            if t:
+                elements.append({"type": "table", **t, "row_pages": [page] * len(t["rows"]), **base})
+                stats["tables"] += 1
+            elif sec["rows"]:
+                txt = T.table_as_text(sec["rows"], b["ocr"])
+                if txt:
+                    elements.append({"type": "paragraph", "text": txt.replace("\n", " "), "role": None, **base})
 
     for b in blocks:
         cls, page, text = b["cls"], b["page"], b["text"]
@@ -479,25 +526,30 @@ def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
         base = {"pages": [page, page], "bbox": b["bbox"], "pw": b["pw"], "ph": b["ph"], "ocr": b["ocr"]}
         if cls == "table":
             tab = b["table"] or {}
-            raw = tab.get("rows")
-            if _is_toc_table(raw):
+            if _is_toc_table(tab.get("rows")):
                 stats["toc_removed"] = stats.get("toc_removed", 0) + 1
                 continue
-            # 框线表格内的通栏标题行把它分成几张小表：标题作为表名，各表只保留自己的列
-            sections = T.split_sections(raw, tab.get("hspan"), tab.get("col_x"), b["ocr"])
-            for k, sec in enumerate(sections):
-                # 拆出的最后一张小表只剩表头：多半是表头被分页截断，保留为只有表头的表格，与下一页的续表合并
-                header_only = len(sections) > 1 and k == len(sections) - 1 and len(sec["rows"]) == 1
-                t = T.normalize_table(sec["rows"], b["ocr"], sec["col_x"], min_rows=1 if header_only else 2) if sec["rows"] else None
-                if sec["title"]:
-                    elements.append({"type": "paragraph", "text": sec["title"], "role": "caption" if t else None, **base})
-                if t:
-                    elements.append({"type": "table", **t, "row_pages": [page] * len(t["rows"]), **base})
-                    stats["tables"] += 1
-                elif sec["rows"]:
-                    txt = T.table_as_text(sec["rows"], b["ocr"])
-                    if txt:
-                        elements.append({"type": "paragraph", "text": txt.replace("\n", " "), "role": None, **base})
+            emit_table(b, tab, base)
+            continue
+        if cls == "picture":
+            img = b.get("image")
+            tab = b.get("table")
+            prose = _is_prose(b)
+            # 成段文字被误识别为图片时只保留文字
+            if img and img["name"] not in repeated_images and (tab or not prose):
+                elements.append({"type": "image", "name": img["name"], "width": img["width"],
+                                 "height": img["height"], **base})
+                stats["images"] = stats.get("images", 0) + 1
+            if tab:
+                emit_table(b, tab, base)
+            elif prose:
+                elements.append({"type": "paragraph", "text": text, "role": None, **base})
+            else:
+                # 图中的图例、说明文字；去掉「QF」「6」这类零散标注
+                legend = " ".join(t for t in (l["text"].strip() for l in b["lines"])
+                                  if len(t) >= 6 or sum(1 for c in t if is_cjk(c)) >= 2)
+                if len(legend) >= 20:
+                    elements.append({"type": "paragraph", "text": legend, "role": None, **base})
             continue
         if not text:
             continue
@@ -507,9 +559,6 @@ def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
             elements.append({"type": "paragraph", "text": text, "role": "footnote", **base})
         elif cls == "code":
             elements.append({"type": "code", "text": "\n".join(l["text"] for l in b["lines"]), **base})
-        elif cls == "picture":
-            if _is_prose(b):
-                elements.append({"type": "paragraph", "text": text, "role": None, **base})
         else:
             elements.append({"type": "paragraph", "text": text, "role": None, **base})
     close_flow()

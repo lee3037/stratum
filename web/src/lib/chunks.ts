@@ -54,8 +54,13 @@ marked.use({
         ? `<a href="${escapeHtml(token.href)}" target="_blank" rel="noopener">${text}</a>`
         : text
     },
+    // 解析时截取的 PDF 图片：同源路径加载（公开地址配置错误时预览仍可显示），其他 http(s) 图片按原地址加载
     image(token) {
-      return escapeHtml(token.text)
+      const own = token.href.match(/\/api\/images\/([0-9a-f]{40}\.(?:png|jpg))$/)
+      const src = own ? `/api/images/${own[1]}` : /^https?:/i.test(token.href) ? token.href : ""
+      if (!src) return escapeHtml(token.text)
+      const alt = escapeHtml(token.text)
+      return `<img src="${escapeHtml(src)}" alt="${alt}" title="${alt}" loading="lazy" />`
     },
   },
 })

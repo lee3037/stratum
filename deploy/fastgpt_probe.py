@@ -5,7 +5,8 @@
     .venv/bin/python deploy/fastgpt_probe.py                 # 只检查连通性并列出知识库
     .venv/bin/python deploy/fastgpt_probe.py --dataset <ID>  # 另外在该知识库中做分块测试
 
-分块测试会创建名为 stratum-probe-*.md 的临时集合（每个只有几百字），读回分块数后立即删除。
+分块测试会创建名为 stratum-probe-* 的临时集合（每个约 1500 字）。FastGPT V4.9 起在后台解析分块、生成向量，
+脚本每 3 秒读一次集合中的数据条数，最多等 --wait 秒（默认 180），读到后立即删除临时集合。
 请把最后输出的「检测结果」整段发给开发者；输出中不包含 API 密钥。
 """
 from __future__ import annotations
@@ -34,9 +35,29 @@ def load_env():
     return None
 
 
+def wait_for_chunks(client, collection_id: str, insert_len, wait: int):
+    """FastGPT 同步返回了块数就直接用；否则轮询集合中的数据条数，直到连续 15 秒不再变化
+    （不在达到 3 条时提前结束，以免分块方式不对、还在继续生成时误判为正确）。"""
+    import time
+    if insert_len:
+        return insert_len
+    end = time.time() + wait
+    last, stable_since = None, time.time()
+    while time.time() < end:
+        count = client.count_data(collection_id) or 0
+        if count != last:
+            print(f"    已生成 {count} 条数据…", flush=True)
+            last, stable_since = count, time.time()
+        if count and time.time() - stable_since >= 15:
+            return count
+        time.sleep(3)
+    return last or 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", help="用于分块测试的 FastGPT 知识库 ID")
+    parser.add_argument("--wait", type=int, default=180, help="每种分块方式最多等待 FastGPT 后台处理的秒数")
     args = parser.parse_args()
     env_file = load_env()
 
@@ -73,9 +94,10 @@ def main():
             os.environ["STRATUM_FASTGPT_SPLIT_MODE"] = mode
             entry: dict = {"chunkSplitMode": mode, "payload": fastgpt.chunk_payload(separator, 800)}
             try:
-                created = client.create_text(args.dataset, f"stratum-probe-{mode}.md", text, separator, 800,
+                created = client.create_text(args.dataset, f"stratum-probe-{mode}", text, separator, 800,
                                              metadata={"source": "stratum-probe"})
                 entry["insertLen"] = created["chunks"]
+                entry["chunks"] = wait_for_chunks(client, created["collection_id"], created["chunks"], args.wait)
                 try:
                     detail = client._request("GET", "/api/core/dataset/collection/detail",
                                              params={"id": created["collection_id"]})
@@ -94,10 +116,12 @@ def main():
             except StorageError as exc:
                 entry["error"] = str(exc)
             report["probe"].append(entry)
-            verdict = ("✓ 正好 3 块" if entry.get("insertLen") == 3 else
-                       f"✗ 得到 {entry.get('insertLen')} 块" if "insertLen" in entry else f"✗ 失败：{entry.get('error')}")
+            got = entry.get("chunks")
+            verdict = ("✓ 正好 3 块" if got == 3 else
+                       f"✗ {args.wait} 秒内 FastGPT 没有生成数据（后台繁忙时可加大 --wait 重试）" if got == 0 else
+                       f"✗ 得到 {got} 块" if "chunks" in entry else f"✗ 失败：{entry.get('error')}")
             print(f"  chunkSplitMode={mode}: {verdict}{'' if entry.get('deleted', True) else '（临时集合删除失败，请手动删除）'}")
-        good = [e["chunkSplitMode"] for e in report["probe"] if e.get("insertLen") == 3]
+        good = [e["chunkSplitMode"] for e in report["probe"] if e.get("chunks") == 3]
         report["recommended_split_mode"] = good[0] if good else None
         if good:
             print(f"\n建议：STRATUM_FASTGPT_SPLIT_MODE={good[0]}" + ("（默认值，无需配置）" if good[0] == "char" else ""))

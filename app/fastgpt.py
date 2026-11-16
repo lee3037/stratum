@@ -153,10 +153,25 @@ class Client:
         return data
 
     def find_collections(self, dataset_id: str, name: str) -> list[dict]:
+        """同名集合：FastGPT 给文本集合的名称加 .txt；手动上传的同名 .md 文件也算同名。"""
         data = self._request("POST", "/api/core/dataset/collection/listV2", body={
             "datasetId": dataset_id, "parentId": None, "searchText": name, "offset": 0, "pageSize": 100})
         items = data.get("list") if isinstance(data, dict) else data
-        return [i for i in items or [] if isinstance(i, dict) and i.get("name") == name and i.get("type") != "folder"]
+        names = {name, f"{name}.txt", f"{name}.md", f"{name}.md.txt"}
+        return [i for i in items or [] if isinstance(i, dict) and i.get("name") in names and i.get("type") != "folder"]
+
+    def count_data(self, collection_id: str) -> int | None:
+        """集合中已生成的数据条数（块数）。FastGPT 在后台解析、向量化，导入后需要一段时间才会完整。"""
+        try:
+            data = self._request("POST", "/api/core/dataset/data/v2/list",
+                                 body={"collectionId": collection_id, "offset": 0, "pageSize": 1})
+        except FastGPTError as exc:
+            if "接口不存在" not in str(exc):
+                raise
+            data = self._request("POST", "/api/core/dataset/data/list",
+                                 body={"collectionId": collection_id, "pageNum": 1, "pageSize": 1})
+        total = data.get("total") if isinstance(data, dict) else None
+        return total if isinstance(total, int) else None
 
     def create_text(self, dataset_id: str, name: str, text: str, separator: str, max_chars: int,
                     metadata: dict | None = None) -> dict:
@@ -239,7 +254,14 @@ def _update_record(kb: Path, dataset_id: str, pdf_rel: str, record: dict | None)
 
 
 def collection_name(pdf_rel: str) -> str:
-    return re.sub(r"\.pdf$", "", pdf_rel, flags=re.I) + ".md"
+    """集合名为去掉 .pdf 的路径。不加扩展名：FastGPT 会给文本集合自动加 .txt，加 .md 会变成 .md.txt。"""
+    return re.sub(r"\.pdf$", "", pdf_rel, flags=re.I)
+
+
+def count_chunks(markdown: str, separator: str) -> int:
+    """按分隔符行切出的非空块数，与 Stratum 中看到的分块一致。"""
+    parts = re.split(rf"^[ \t]*{re.escape(separator)}[ \t]*$", markdown, flags=re.M)
+    return sum(1 for part in parts if part.strip())
 
 
 def status_summary(kb: Path) -> dict:
@@ -312,13 +334,14 @@ def _import_one(client: Client, kb: Path, pdf_rel: str, md_rel: str | None, on_c
             existing = client.find_collections(dataset_id, name)
             if existing:
                 if on_conflict == "ask":
-                    return {"pdf_path": pdf_rel, "status": "conflict", "md_path": version["path"], "name": name,
-                            "message": f"FastGPT 知识库中已有同名集合「{name}」（不是通过 Stratum 导入的）"}
+                    shown = existing[0].get("name") or name
+                    return {"pdf_path": pdf_rel, "status": "conflict", "md_path": version["path"], "name": shown,
+                            "message": f"FastGPT 知识库中已有同名集合「{shown}」（不是通过 Stratum 导入的）"}
                 if on_conflict == "replace":
                     replace_ids = [c["_id"] for c in existing if c.get("_id")]
                 elif on_conflict == "skip":
                     return {"pdf_path": pdf_rel, "status": "skipped", "md_path": version["path"],
-                            "message": f"已有同名集合「{name}」，按设置跳过"}
+                            "message": f"已有同名集合「{existing[0].get('name') or name}」，按设置跳过"}
         created = client.create_text(dataset_id, name, doc["markdown"], separator, int(chunk.get("max_chars") or 1000),
                                      metadata={"source": "stratum", "pdf": pdf_rel, "version": version["version"]})
     except StorageError as exc:
@@ -332,13 +355,16 @@ def _import_one(client: Client, kb: Path, pdf_rel: str, md_rel: str | None, on_c
             client.delete_collection(old)
         except StorageError as exc:
             warnings.append(f"新集合已创建，但删除旧集合 {old} 失败：{exc}")
+    # FastGPT V4.9 起在后台解析分块，create/text 返回的 insertLen 为 0；这时按分隔符在本地计数，
+    # 即发送给 FastGPT 的块数（分块方式由 deploy/fastgpt_probe.py 确认与之一致）
+    chunks = created["chunks"] or count_chunks(doc["markdown"], separator)
     record = {
         "version": version["version"], "md_path": version["path"], "md_etag": doc["etag"],
-        "collection_id": created["collection_id"], "collection_name": name, "chunks": created["chunks"],
+        "collection_id": created["collection_id"], "collection_name": name, "chunks": chunks,
         "separator": separator, "imported": time.time(), "error": None,
     }
     _update_record(kb, dataset_id, pdf_rel, record)
-    return {"pdf_path": pdf_rel, "status": "imported", "md_path": version["path"], "chunks": created["chunks"],
+    return {"pdf_path": pdf_rel, "status": "imported", "md_path": version["path"], "chunks": chunks,
             "replaced": len(old_ids), "message": "；".join(warnings) or None}
 
 

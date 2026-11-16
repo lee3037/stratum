@@ -57,6 +57,32 @@ function kbFromUrl(): string | null {
 }
 
 /** 地址栏带上知识库名称，方便收藏或发给同事直接打开。 */
+/** 进行中或已完成、尚未保存的单个解析任务。记在浏览器里，刷新页面后接着显示进度或结果。 */
+interface StoredJob {
+  id: string
+  path: string
+  pageCount: number
+  settings: ParseSettings
+}
+
+const jobKey = (kb: string) => `stratum.job.${kb}`
+
+function rememberJob(kb: string, job: StoredJob | null) {
+  try {
+    if (job) localStorage.setItem(jobKey(kb), JSON.stringify(job))
+    else localStorage.removeItem(jobKey(kb))
+  } catch { /* 存储不可用时只是不能在刷新后接回 */ }
+}
+
+function storedJob(kb: string): StoredJob | null {
+  try {
+    const job = JSON.parse(localStorage.getItem(jobKey(kb)) || "null")
+    return job && typeof job.id === "string" && typeof job.path === "string" && job.settings ? job : null
+  } catch {
+    return null
+  }
+}
+
 function rememberKb(name: string | null) {
   const url = new URL(window.location.href)
   if (name) url.searchParams.set("kb", name)
@@ -184,53 +210,83 @@ export default function App() {
 
   // ---------------------------------------------------------------- 转换
 
+  /** 跟踪单个解析任务直到出结果。新开始的任务和刷新页面后接回的任务（resumed）共用。 */
+  const followJob = useCallback((job: StoredJob, run: number, resumed = false) => {
+    if (!project) return
+    const kb = project.name
+    const size = project.files.find((f) => f.path === job.path)?.size ?? 0
+    const base = { name: baseName(job.path), size, path: job.path }
+    setPreview(null)
+    setBatchOpen(false)
+    setPending({ ...base, done: 0, total: job.pageCount })
+    const tick = async () => {
+      try {
+        const state = await getJob(job.id)
+        if (run !== runRef.current) return
+        if (state.status === "done" && state.result) {
+          // 后端可以瞬间完成；让进度组件补完各阶段和逐页计数，再切换到结果。
+          await new Promise<void>((resolve) => {
+            setPending({ ...base, done: job.pageCount, total: job.pageCount, onComplete: resolve })
+          })
+          if (run !== runRef.current) return
+          await publishResult({ jobId: job.id, path: job.path, result: state.result }, state.result.markdown, job.settings)
+          setPending(null)
+          if (resumed) toast({ title: `已恢复「${baseName(job.path)}」的解析结果，尚未保存`, status: "info" })
+          state.result.warnings.forEach((w) => toast({ title: w, status: "info", duration: 8000 }))
+          return
+        }
+        if (state.status === "error") throw new Error(state.error || "转换失败")
+        setPending({ ...base, done: state.progress.done, total: state.progress.total })
+        pollRef.current = window.setTimeout(tick, 700)
+      } catch (e) {
+        if (run !== runRef.current) return
+        rememberJob(kb, null)
+        setPending(null)
+        // 接回时任务已过期（服务重启或超过 3 小时）就不再提示
+        if (!(resumed && e instanceof Error && e.message.includes("不存在"))) fail("转换失败", e)
+      }
+    }
+    void tick()
+  }, [project, publishResult])
+
   const convert = useCallback(
     async (path: string, settings: ParseSettings = { convert: convertOpts, chunk: draft }) => {
       if (!project) return
       const run = ++runRef.current
       const opts = { ...settings.convert, ...settings.chunk }
       const size = project.files.find((f) => f.path === path)?.size ?? 0
-      const base = { name: baseName(path), size, path }
       setPreview(null)
       setBatchOpen(false)
-      setPending({ ...base, done: 0, total: 0 })
+      setPending({ name: baseName(path), size, path, done: 0, total: 0 })
       try {
         const { id, page_count } = await startKbJob(project.name, path, opts)
         if (run !== runRef.current) return
-        setPending({ ...base, done: 0, total: page_count })
-        const tick = async () => {
-          try {
-            const job = await getJob(id)
-            if (run !== runRef.current) return
-            if (job.status === "done" && job.result) {
-              // 后端可以瞬间完成；让进度组件补完各阶段和逐页计数，再切换到结果。
-              await new Promise<void>((resolve) => {
-                setPending({ ...base, done: page_count, total: page_count, onComplete: resolve })
-              })
-              if (run !== runRef.current) return
-              await publishResult({ jobId: id, path, result: job.result }, job.result.markdown, settings)
-              setPending(null)
-              job.result.warnings.forEach((w) => toast({ title: w, status: "info", duration: 8000 }))
-              return
-            }
-            if (job.status === "error") throw new Error(job.error || "转换失败")
-            setPending({ ...base, done: job.progress.done, total: job.progress.total })
-            pollRef.current = window.setTimeout(tick, 700)
-          } catch (e) {
-            if (run !== runRef.current) return
-            fail("转换失败", e)
-            setPending(null)
-          }
-        }
-        tick()
+        const job = { id, path, pageCount: page_count, settings }
+        rememberJob(project.name, job)
+        followJob(job, run)
       } catch (e) {
         if (run !== runRef.current) return
         fail("提交解析失败", e)
         setPending(null)
       }
     },
-    [project, convertOpts, draft, publishResult]
+    [project, convertOpts, draft, followJob]
   )
+
+  // 刷新页面或重新进入知识库后，接回本浏览器尚未保存的单个解析任务
+  const resumedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!project || resumedFor.current === project.name) return
+    resumedFor.current = project.name
+    const job = storedJob(project.name)
+    if (!job || pending || doc) return
+    if (!project.files.some((f) => f.path === job.path)) {
+      rememberJob(project.name, null)
+      return
+    }
+    const run = ++runRef.current
+    queueMicrotask(() => followJob(job, run, true))
+  }, [project, pending, doc, followJob])
 
   /** 上传到当前知识库；autoParse 时，只上传了一个 PDF 就直接用默认参数解析它。 */
   const upload = useCallback(async (items: UploadItem[], autoParse = false) => {
@@ -268,6 +324,17 @@ export default function App() {
 
   const selectPath = (path: string) => {
     if (!project || pending || busy || saveState === "loading") return
+    const batchState = project.active[path]
+    if (batchState) {
+      // 正在批量解析：不再提供单独解析，打开批量处理查看进度
+      setBatchOpen(true)
+      toast({
+        title: `「${baseName(path)}」正在批量解析（${batchState === "queued" ? "排队中" : "解析中"}）`,
+        description: "完成后会自动保存为新版本，可在批量处理中查看进度",
+        status: "info",
+      })
+      return
+    }
     setBatchOpen(false)
     const latest = [...project.artifacts, ...artifacts]
       .filter((artifact) => artifact.pdfPath === path)
@@ -428,8 +495,8 @@ export default function App() {
     setSettingsOpen(true)
   }
 
-  /** 导入一个已保存的版本；遇到不是本系统导入的同名集合时询问替换还是保留。auto：保存后自动导入 */
-  const importVersion = async (proj: Project, pdfPath: string, mdPath: string, auto = false) => {
+  /** 导入一个已保存的版本；遇到不是本系统导入的同名集合时询问替换还是保留。afterSave：紧接着保存之后导入 */
+  const importVersion = async (proj: Project, pdfPath: string, mdPath: string, afterSave = false) => {
     const dataset = proj.fastgpt.dataset?.name
     if (!dataset) return
     setImporting(true)
@@ -447,18 +514,18 @@ export default function App() {
       }
       if (result.status === "imported") {
         toast({
-          title: `${auto ? "已保存并自动导入" : "已导入"}「${dataset}」${result.chunks != null ? `，共 ${result.chunks} 块` : ""}`,
+          title: `${afterSave ? "已保存并导入" : "已导入"}「${dataset}」${result.chunks != null ? `，共 ${result.chunks} 块` : ""}`,
           description: result.message ?? (result.replaced ? "已替换旧版本的集合" : undefined),
           status: result.message ? "info" : "success",
         })
       } else if (result.status === "unchanged") {
-        if (!auto) toast({ title: "这个版本已导入，内容没有变化", status: "info" })
+        if (!afterSave) toast({ title: "这个版本已导入，内容没有变化", status: "info" })
       } else {
-        toast({ title: auto ? "已保存，但自动导入 FastGPT 失败" : "导入 FastGPT 失败", description: result.message ?? undefined, status: "error" })
+        toast({ title: afterSave ? "已保存，但导入 FastGPT 失败" : "导入 FastGPT 失败", description: result.message ?? undefined, status: "error" })
       }
       setProject(await rescan(proj).catch(() => proj))
     } catch (e) {
-      fail(auto ? "已保存，但自动导入 FastGPT 失败" : "导入 FastGPT 失败", e)
+      fail(afterSave ? "已保存，但导入 FastGPT 失败" : "导入 FastGPT 失败", e)
     } finally {
       setImporting(false)
     }
@@ -468,67 +535,6 @@ export default function App() {
   useEffect(() => {
     importVersionRef.current = importVersion
   })
-
-  /** 导入当前打开的已保存版本 */
-  const importCurrent = async () => {
-    if (!project || !current || importing) return
-    if (!current.saved || current.unsaved) {
-      toast({ title: "请先保存这个版本，再导入 FastGPT", status: "info" })
-      return
-    }
-    if (!project.fastgpt.configured) {
-      toast({ title: "服务端未配置 FastGPT，无法导入", description: "请联系管理员配置 STRATUM_FASTGPT_URL 和 STRATUM_FASTGPT_API_KEY", status: "error" })
-      return
-    }
-    if (!project.fastgpt.dataset) {
-      toast({ title: "请先在知识库设置中绑定 FastGPT 知识库", status: "info" })
-      openSettings()
-      return
-    }
-    await importVersion(project, current.pdfPath, current.path)
-  }
-
-  const importStatus = (() => {
-    if (!project?.fastgpt.configured || !current) return null
-    const canImport = current.saved && !current.unsaved
-    const button = (
-      <Hint label={canImport ? "把这个版本导入绑定的 FastGPT 知识库" : "先保存这个版本，再导入"}>
-        <Button
-          aria-label="导入 FastGPT"
-          className="rounded-full"
-          disabled={importing || busy || saveState === "loading"}
-          onClick={importCurrent}
-          size="xs"
-          variant="outline"
-        >
-          {importing ? <LoaderCircle className="animate-spin" /> : <Send />}
-          {importing ? "导入中" : "导入 FastGPT"}
-        </Button>
-      </Hint>
-    )
-    if (!project.fastgpt.dataset) return button
-    const record = project.fastgpt.imports[current.pdfPath]
-    let text = "未导入 FastGPT"
-    let tone = "text-muted-foreground"
-    if (record?.error) {
-      text = "FastGPT 导入失败"
-      tone = "text-red-600 dark:text-red-400"
-    } else if (record?.md_path === current.path) {
-      // 用文件标识判断：导入后这个版本又被修改过（或有未保存的编辑）时需要重新导入
-      const changed = current.unsaved || (!!record.md_etag && record.md_etag !== current.etag)
-      text = changed ? "已修改，需重新导入" : `已导入 FastGPT${record.chunks != null ? ` · ${record.chunks} 块` : ""}`
-      tone = changed ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
-    } else if (record) {
-      text = `FastGPT 中为 ${baseName(record.md_path)}`
-      tone = "text-amber-600 dark:text-amber-400"
-    }
-    return (
-      <span className="flex items-center gap-2">
-        <span className={`whitespace-nowrap text-xs ${tone}`} title={record?.error ?? undefined}>{text}</span>
-        {button}
-      </span>
-    )
-  })()
 
   // ---------------------------------------------------------------- 编辑与导出
 
@@ -546,8 +552,10 @@ export default function App() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000)
   }
 
-  const save = useCallback(async () => {
-    if (!project || !current || pending || preview || busy || saveState !== "idle") return
+  /** 保存当前版本。andImport：保存后导入 FastGPT（知识库开启了自动导入时总是导入） */
+  const save = useCallback(async (andImport?: boolean) => {
+    // 只拦截保存中；刚保存完（按钮还显示「已保存」）时仍可再次保存或保存并导入
+    if (!project || !current || pending || preview || busy || saveState === "loading") return
     if (current.saved && overwriteOk.current !== current.path) {
       if (!window.confirm(`确定保存对 ${current.path} 的修改？`)) return
     }
@@ -578,6 +586,7 @@ export default function App() {
         setActiveArtifact(saved.path)
         overwriteOk.current = saved.path
         savedPath = saved.path
+        if (current.doc.jobId && storedJob(project.name)?.id === current.doc.jobId) rememberJob(project.name, null)
         if (saved.path !== current.path) {
           toast({ title: `${baseName(current.path)} 已被占用，保存为 ${baseName(saved.path)}`, status: "info" })
         }
@@ -585,7 +594,7 @@ export default function App() {
       const fresh = await rescan(project).catch(() => project)
       setProject(fresh)
       setSaveState("success")
-      if (fresh.fastgpt.configured && fresh.fastgpt.dataset && fresh.fastgpt.auto_import) {
+      if (fresh.fastgpt.configured && fresh.fastgpt.dataset && (andImport === true || fresh.fastgpt.auto_import)) {
         void importVersionRef.current(fresh, current.pdfPath, savedPath, true)
       }
     } catch (e) {
@@ -593,6 +602,67 @@ export default function App() {
       setSaveState("error")
     }
   }, [project, current, pending, preview, busy, saveState, updateCurrent])
+
+  /** 导入当前打开的版本；未保存（或有未保存的修改）时先保存再导入 */
+  const importCurrent = async () => {
+    if (!project || !current || importing) return
+    if (!project.fastgpt.configured) {
+      toast({ title: "服务端未配置 FastGPT，无法导入", description: "请联系管理员配置 STRATUM_FASTGPT_URL 和 STRATUM_FASTGPT_API_KEY", status: "error" })
+      return
+    }
+    if (!project.fastgpt.dataset) {
+      toast({ title: "请先在知识库设置中绑定 FastGPT 知识库", status: "info" })
+      openSettings()
+      return
+    }
+    if (!current.saved || current.unsaved) {
+      await save(true)
+      return
+    }
+    await importVersion(project, current.pdfPath, current.path)
+  }
+
+  const importStatus = (() => {
+    if (!project?.fastgpt.configured || !current) return null
+    const saved = current.saved && !current.unsaved
+    const button = (
+      <Hint label={saved ? "把这个版本导入绑定的 FastGPT 知识库" : "保存到知识库，并导入绑定的 FastGPT 知识库"}>
+        <Button
+          aria-label="导入 FastGPT"
+          className="rounded-full"
+          disabled={importing || busy || saveState === "loading"}
+          onClick={importCurrent}
+          size="xs"
+          variant="outline"
+        >
+          {importing ? <LoaderCircle className="animate-spin" /> : <Send />}
+          {importing ? "导入中" : saved ? "导入 FastGPT" : "保存并导入 FastGPT"}
+        </Button>
+      </Hint>
+    )
+    if (!project.fastgpt.dataset) return button
+    const record = project.fastgpt.imports[current.pdfPath]
+    let text = "未导入 FastGPT"
+    let tone = "text-muted-foreground"
+    if (record?.error) {
+      text = "FastGPT 导入失败"
+      tone = "text-red-600 dark:text-red-400"
+    } else if (record?.md_path === current.path) {
+      // 用文件标识判断：导入后这个版本又被修改过（或有未保存的编辑）时需要重新导入
+      const changed = current.unsaved || (!!record.md_etag && record.md_etag !== current.etag)
+      text = changed ? "已修改，需重新导入" : `已导入 FastGPT${record.chunks != null ? ` · ${record.chunks} 块` : ""}`
+      tone = changed ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
+    } else if (record) {
+      text = `FastGPT 中为 ${baseName(record.md_path)}`
+      tone = "text-amber-600 dark:text-amber-400"
+    }
+    return (
+      <span className="flex items-center gap-2">
+        <span className={`whitespace-nowrap text-xs ${tone}`} title={record?.error ?? undefined}>{text}</span>
+        {button}
+      </span>
+    )
+  })()
 
   // 保存按钮的成功 / 失败状态停留片刻后恢复
   useEffect(() => {

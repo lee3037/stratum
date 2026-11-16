@@ -100,9 +100,12 @@ def test_health_reports_pool_and_batches(client):
 def test_single_parse_and_batch_share_workers(client):
     """真实解析：单个解析与批量解析同时进行时都能完成。"""
     import time
-    client.post(f"/api/kbs/{KB}/files", files=[("files", ("b.pdf", SAMPLE, "application/pdf"))])
+    for name in ("b.pdf", "c.pdf"):
+        client.post(f"/api/kbs/{KB}/files", files=[("files", (name, SAMPLE, "application/pdf"))])
     batch = client.post(f"/api/kbs/{KB}/batches", json={"paths": ["a.pdf", "b.pdf"], "skip_converted": False}).json()
-    job = client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf"}).json()
+    # 正在批量解析的文件不能再单独解析；单个解析另一个文件
+    assert client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf"}).status_code == 409
+    job = client.post(f"/api/kbs/{KB}/jobs", json={"path": "c.pdf"}).json()
     end = time.time() + 180
     while time.time() < end:
         j = client.get(f"/api/jobs/{job['id']}").json()

@@ -245,6 +245,12 @@ with sync_playwright() as p:
     checks["筛选未转换并全选"] = pending_count == 2  # two_column.pdf 与 complex_cn(2).pdf
     stage.get_by_role("button", name=f"批量解析（{pending_count}）").click()
     page.get_by_role("dialog").get_by_role("button", name=f"开始批量解析（{pending_count}）").click()
+    # 正在批量解析的文件：点击不再弹出「开始解析分块」，而是提示并留在批量处理
+    busy_link = page.locator('aside a[href="#complex_cn(2).pdf"]')
+    busy_link.get_by_text("中", exact=False).wait_for(timeout=10000)  # 排队中 / 解析中
+    busy_link.click()
+    page.get_by_text("正在批量解析", exact=False).first.wait_for()
+    checks["批量中的文件不再弹出解析"] = page.get_by_role("dialog").count() == 0
     batches = page.get_by_role("region", name="最近的批次")
     batches.get_by_text("已结束").wait_for(timeout=300000)
     checks["批量结果自动保存"] = (DATA / KB / "two_column_v1.md").exists() and (DATA / KB / "complex_cn(2)_v1.md").exists()
@@ -284,7 +290,8 @@ with sync_playwright() as p:
         page.get_by_text("导入完成：成功 3 个").wait_for(timeout=30000)
         state = json.load(urllib.request.urlopen(fake_url + "/_state"))
         names = sorted(c["name"] for c in state["collections"])
-        checks["批量导入 FastGPT"] = names == ["complex_cn(2).md", "complex_cn.md", "two_column.md"]
+        # 集合名不带 .md，FastGPT 自动加 .txt
+        checks["批量导入 FastGPT"] = names == ["complex_cn(2).txt", "complex_cn.txt", "two_column.txt"]
         checks["按分隔符分块导入"] = all(c["chunkSplitter"] and c["chunkSettingMode"] == "custom" for c in state["collections"])
         page.wait_for_timeout(500)
         checks["FastGPT 状态列"] = stage.get_by_text("已导入 v1").count() == 2
@@ -311,12 +318,46 @@ with sync_playwright() as p:
         page.locator("textarea").fill(page.locator("textarea").input_value() + "\n自动导入的修改\n")
         page.once("dialog", lambda d: d.accept())
         page.get_by_role("button", name="保存到知识库", exact=True).click()
-        page.get_by_text("已保存并自动导入", exact=False).first.wait_for(timeout=30000)
+        page.get_by_text("已保存并导入", exact=False).first.wait_for(timeout=30000)
         state = json.load(urllib.request.urlopen(fake_url + "/_state"))
         checks["保存后自动导入"] = (
             sorted(c["name"] for c in state["collections"]) == names
             and any("自动导入的修改" in c["text"] for c in state["collections"])
         )
+        page.get_by_text("已导入 FastGPT · ", exact=False).first.wait_for()
+        checks["导入后显示块数"] = page.get_by_text("已导入 FastGPT · 0 块", exact=False).count() == 0
+
+        # 有未保存的修改时，「导入 FastGPT」一键保存并导入
+        page.locator("textarea").fill(page.locator("textarea").input_value() + "\n一键导入的修改\n")
+        import_button = page.get_by_role("button", name="导入 FastGPT", exact=True)
+        checks["未保存时显示保存并导入"] = "保存并导入" in import_button.inner_text()
+        page.once("dialog", lambda d: d.accept())
+        import_button.click()
+        for _ in range(60):
+            state = json.load(urllib.request.urlopen(fake_url + "/_state"))
+            if any("一键导入的修改" in c["text"] for c in state["collections"]):
+                break
+            page.wait_for_timeout(500)
+        checks["一键保存并导入"] = (
+            sorted(c["name"] for c in state["collections"]) == names
+            and any("一键导入的修改" in c["text"] for c in state["collections"])
+        )
+
+    # 单个解析开始后刷新页面：接回任务，显示尚未保存的结果
+    page.goto(BASE + f"?kb={KB}")
+    upload(page, "上传 PDF", [{"name": "text_cn.pdf", "mimeType": "application/pdf",
+                               "buffer": (SAMPLES / "text_cn.pdf").read_bytes()}])
+    page.locator('aside a[href="#text_cn.pdf"]').wait_for()
+    parse_from_sidebar(page, "text_cn.pdf")
+    page.wait_for_timeout(300)
+    page.reload()
+    page.get_by_text("已恢复「text_cn.pdf」的解析结果", exact=False).first.wait_for(timeout=180000)
+    checks["刷新后接回解析结果"] = version_link(page, "text_cn_v1.md").count() == 1 and not (DATA / KB / "text_cn_v1.md").exists()
+    save_current(page)
+    page.reload()
+    page.locator('aside a[href="#text_cn.pdf"]').wait_for()
+    page.wait_for_timeout(1500)
+    checks["保存后刷新不再恢复"] = page.get_by_text("已恢复", exact=False).count() == 0
 
     # 切换知识库：回到列表
     page.locator("header button", has_text=KB).click()

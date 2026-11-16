@@ -422,13 +422,25 @@ class KbJobBody(BaseModel):
 
 @app.post("/api/kbs/{kb}/jobs")
 def create_kb_job(kb: str, body: KbJobBody):
-    """解析知识库中已上传的 PDF，不再重复上传。"""
+    """解析知识库中已上传的 PDF，不再重复上传。
+
+    同一文件正在批量解析时拒绝（批量完成后会自动保存）；同一文件、同样参数的单个解析正在进行时，
+    返回那个任务（例如刷新页面或两人同时点击），不重复解析。"""
     opts = _validate_options(body.options)
     folder = storage.kb_dir(kb)
     pdf = storage.pdf_path(folder, body.path)
+    rel = storage.clean_rel(body.path)
+    state = batches.active_paths(folder.name).get(rel)
+    if state:
+        raise StorageError(f"该文件正在批量解析（{'排队中' if state == 'queued' else '解析中'}），完成后会自动保存，无需再次解析", 409)
+    with _lock:
+        running = next((j for j in _jobs.values() if j.get("kb") == folder.name and j.get("path") == rel
+                        and j["status"] in ("queued", "running") and j["convert_options"] == opts), None)
+    if running:
+        return {"id": running["id"], "page_count": running["page_count"], "joined": True}
     _check_capacity()
     page_count = _page_count(pdf)
-    job_id = _submit(pdf, pdf.name, opts, page_count, kb=folder.name, path=storage.clean_rel(body.path))
+    job_id = _submit(pdf, pdf.name, opts, page_count, kb=folder.name, path=rel)
     return {"id": job_id, "page_count": page_count}
 
 

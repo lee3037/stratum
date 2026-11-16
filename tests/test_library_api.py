@@ -157,3 +157,26 @@ def test_batch_parse_and_zip_download(client):
     assert empty.status_code == 400
     assert client.post(f"/api/kbs/{KB}/batches", json={"paths": []}).status_code == 400
     assert client.get(f"/api/kbs/{KB}/batches/nope").status_code == 404
+
+
+def test_kb_job_joins_running_and_refuses_batch_files(client, monkeypatch):
+    from app import server
+
+    pdf = (ROOT / "samples" / "text_cn.pdf").read_bytes()
+    upload(client, ("a.pdf", pdf))
+    # 同一文件、同样参数的单个解析正在进行：返回那个任务，不重复解析
+    opts = {"max_chars": 800}
+    fake = {"id": "running1", "kb": KB, "path": "a.pdf", "status": "running", "convert_options": opts,
+            "page_count": 3, "updated": time.time()}
+    monkeypatch.setitem(server._jobs, "running1", fake)
+    submitted = []
+    monkeypatch.setattr(server, "_submit", lambda *a, **k: submitted.append(a) or "new1")
+    r = client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf", "options": opts}).json()
+    assert r == {"id": "running1", "page_count": 3, "joined": True} and not submitted
+    # 参数不同：新建任务
+    r = client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf", "options": {"max_chars": 900}}).json()
+    assert r["id"] == "new1" and len(submitted) == 1
+    # 正在批量解析：拒绝
+    monkeypatch.setattr(server.batches, "active_paths", lambda kb: {"a.pdf": "queued"})
+    r = client.post(f"/api/kbs/{KB}/jobs", json={"path": "a.pdf", "options": opts})
+    assert r.status_code == 409 and "批量解析" in r.json()["detail"]

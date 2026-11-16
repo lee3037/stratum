@@ -57,8 +57,14 @@ class FakeFastGPT:
             self.next_id += 1
             cid = f"c{self.next_id}"
             chunks = [c for c in body["text"].split(body["chunkSplitter"]) if c.strip()]
-            self.collections[cid] = {"_id": cid, **body}
-            return ok({"collectionId": cid, "results": {"insertLen": len(chunks)}})
+            # 与 FastGPT V4.14 一致：文本集合名称自动加 .txt；后台解析分块，insertLen 为 0
+            self.collections[cid] = {"_id": cid, **body, "name": f"{body['name']}.txt", "chunks": len(chunks)}
+            return ok({"collectionId": cid, "results": {"insertLen": 0}})
+        if path == "/api/core/dataset/data/v2/list":
+            coll = self.collections.get(body.get("collectionId"))
+            if not coll:
+                return httpx.Response(500, json={"code": 500, "message": "Collection not found"})
+            return ok({"list": [], "total": coll["chunks"]})
         if path == "/api/core/dataset/collection/delete":
             if self.fail_delete:
                 return httpx.Response(500, json={"code": 500, "message": "busy"})
@@ -167,6 +173,22 @@ def test_auto_import_toggle_and_run(client, fake):
     assert fastgpt.auto_import(server.fastgpt_client, kb, "c.pdf") is None
 
 
+def test_count_chunks_and_names():
+    assert fastgpt.count_chunks(text("一", "二", "三"), "===CHUNK===") == 3
+    assert fastgpt.count_chunks("一\n===CHUNK===\n\n===CHUNK===\n二", "===CHUNK===") == 2
+    assert fastgpt.count_chunks("正文里出现 ===CHUNK=== 不算分隔", "===CHUNK===") == 1
+    assert fastgpt.collection_name("规程/操作规程.PDF") == "规程/操作规程"
+
+
+def test_old_md_txt_collection_counts_as_same_name(client, fake):
+    # 旧版本以 a.md 为名导入，FastGPT 中显示为 a.md.txt
+    client.put(f"/api/kbs/{KB}/fastgpt", json={"dataset_id": "ds1"})
+    fake.collections["old"] = {"_id": "old", "datasetId": "ds1", "name": "a.md.txt"}
+    save("a.pdf", text("一", "二"))
+    r = client.post(f"/api/kbs/{KB}/fastgpt/import", json={"pdf_path": "a.pdf"}).json()
+    assert r["status"] == "conflict" and "a.md.txt" in r["message"]
+
+
 def test_kb_name_from():
     assert storage.kb_name_from("部门 / 规程") == "部门 - 规程"
     assert storage.kb_name_from("..x") == "x"
@@ -194,7 +216,10 @@ def test_import_replace_and_unchanged(client, fake):
     r = client.post(f"/api/kbs/{KB}/fastgpt/import", json={"pdf_path": "sub/b.pdf"}).json()
     assert r["status"] == "imported" and r["chunks"] == 3 and r["md_path"] == v1["path"]
     sent = next(b for m, p, b in fake.requests if p.endswith("/create/text"))
-    assert sent["name"] == "sub/b.md" and sent["datasetId"] == "ds1"
+    assert sent["name"] == "sub/b" and sent["datasetId"] == "ds1"
+    stored = next(iter(fake.collections.values()))
+    assert stored["name"] == "sub/b.txt"  # FastGPT 自动加 .txt；insertLen 为 0 时按分隔符本地计数
+    assert server.fastgpt_client.count_data(stored["_id"]) == 3
     assert sent["chunkSettingMode"] == "custom" and sent["chunkSplitMode"] == "char"
     assert sent["chunkSplitter"] == "===CHUNK===" and sent["chunkSize"] == 1600
     assert sent["metadata"] == {"source": "stratum", "pdf": "sub/b.pdf", "version": 1}

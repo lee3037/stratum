@@ -102,6 +102,8 @@ export interface KbSummary {
   pdfs: number
   converted: number
   updated: number
+  /** 绑定的 FastGPT 知识库 */
+  fastgpt: { dataset_id: string; dataset_name: string | null } | null
 }
 
 export interface KbSettings {
@@ -257,6 +259,16 @@ export async function downloadZip(kb: string, body: { mode: ExportMode; paths?: 
 
 export async function listDatasets() {
   return (await json<{ datasets: FastgptDataset[] }>(await fetch("api/fastgpt/datasets"))).datasets
+}
+
+export async function fastgptStatus() {
+  return json<{ configured: boolean; url: string | null }>(await fetch("api/fastgpt"))
+}
+
+/** 为 FastGPT 知识库新建（或找到已有的）同名 Stratum 知识库并绑定，返回知识库名称。 */
+export async function kbFromDataset(datasetId: string) {
+  return json<{ name: string; created: boolean }>(
+    await fetch(`api/fastgpt/datasets/${encodeURIComponent(datasetId)}/kb`, { method: "POST" }))
 }
 
 export async function bindDataset(kb: string, datasetId: string | null) {

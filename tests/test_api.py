@@ -73,3 +73,12 @@ def test_convert_rechunk_and_errors(client):
     bad = client.post("/api/jobs", files={"file": ("a.pdf", b"hello", "application/pdf")})
     assert bad.status_code == 400
     assert client.get("/").status_code == 200
+
+
+def test_static_cache_headers(client):
+    # 首页每次向服务器确认，部署后立即生效；带哈希的 assets 可长期缓存
+    index = client.get("/")
+    assert index.status_code == 200 and index.headers["cache-control"] == "no-cache"
+    asset = next(p for p in (server.STATIC_DIR / "assets").iterdir() if p.suffix == ".js")
+    r = client.get(f"/assets/{asset.name}")
+    assert r.status_code == 200 and "immutable" in r.headers["cache-control"]

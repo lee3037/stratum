@@ -521,6 +521,30 @@ def fastgpt_datasets():
     return {"datasets": fastgpt_client.list_datasets()}
 
 
+_kb_from_dataset_lock = threading.Lock()
+
+
+@app.post("/api/fastgpt/datasets/{dataset_id}/kb")
+def kb_from_dataset(dataset_id: str):
+    """为 FastGPT 知识库准备一个 Stratum 知识库并绑定：已有绑定的直接返回；
+    有同名且未绑定的知识库就绑定它；否则新建同名知识库（重名时加 (2)）。"""
+    detail = fastgpt_client.dataset_detail(dataset_id)
+    dataset_name = detail.get("name") or dataset_id
+    with _kb_from_dataset_lock:
+        kbs = storage.list_kbs()
+        for kb in kbs:
+            if (kb.get("fastgpt") or {}).get("dataset_id") == dataset_id:
+                return {"name": kb["name"], "created": False}
+        name = storage.kb_name_from(dataset_name)
+        same = next((kb for kb in kbs if kb["name"].lower() == name.lower() and not kb.get("fastgpt")), None)
+        if same:
+            folder, created = storage.kb_dir(same["name"]), False
+        else:
+            folder, created = storage.create_kb(storage.free_kb_name(name)), True
+        fastgpt.set_binding(folder, dataset_id, dataset_name)
+    return {"name": folder.name, "created": created}
+
+
 @app.get("/api/kbs/{kb}/fastgpt")
 def kb_fastgpt(kb: str):
     return fastgpt.status_summary(storage.kb_dir(kb))
@@ -596,4 +620,17 @@ def health():
                          "batches": batches.stats(), "storage": storage.root_status()})
 
 
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+class _StaticFiles(StaticFiles):
+    """首页每次都向服务器确认，更新部署后浏览器立即拿到新版；
+    assets/ 下的文件名带内容哈希，可以长期缓存。"""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if str(full_path).endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache"
+        elif "/assets/" in str(full_path).replace("\\", "/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+app.mount("/", _StaticFiles(directory=STATIC_DIR, html=True), name="static")

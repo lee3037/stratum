@@ -324,13 +324,33 @@ def list_kbs() -> list[dict]:
             continue
         inventory = scan(child)
         times = [e["mtime"] for e in inventory["files"] + inventory["artifacts"]]
+        bound = read_settings(child).get("fastgpt")
         result.append({
             "name": child.name,
             "pdfs": len(inventory["files"]),
             "converted": sum(f["converted"] for f in inventory["files"]),
             "updated": max(times, default=child.stat().st_mtime),
+            "fastgpt": {"dataset_id": bound["dataset_id"], "dataset_name": bound.get("dataset_name")}
+            if isinstance(bound, dict) and bound.get("dataset_id") else None,
         })
     return sorted(result, key=lambda kb: natural_key(kb["name"]))
+
+
+def kb_name_from(text: str) -> str:
+    """把外部名称（如 FastGPT 知识库名）转成合法的知识库目录名。"""
+    name = _BAD_SEGMENT_CHARS.sub("-", text or "").strip().lstrip(".").strip()[:64].strip()
+    return name or "知识库"
+
+
+def free_kb_name(name: str) -> str:
+    """name 已被占用（不区分大小写）时依次尝试 name(2)、name(3)…"""
+    taken = {c.name.lower() for c in ensure_root().iterdir()}
+    candidate, n = name, 1
+    while candidate.lower() in taken:
+        n += 1
+        suffix = f"({n})"
+        candidate = name[:64 - len(suffix)] + suffix
+    return candidate
 
 
 def create_kb(name: str) -> Path:

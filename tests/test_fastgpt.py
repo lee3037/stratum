@@ -120,6 +120,36 @@ def test_list_and_bind(client, fake):
     assert client.put(f"/api/kbs/{KB}/fastgpt", json={"dataset_id": None}).json()["dataset"] is None
 
 
+def test_kb_from_dataset(client, fake):
+    # 新建同名知识库并绑定
+    r = client.post("/api/fastgpt/datasets/ds1/kb")
+    assert r.status_code == 200 and r.json() == {"name": "安全规程", "created": True}
+    kbs = {kb["name"]: kb for kb in client.get("/api/kbs").json()["kbs"]}
+    assert kbs["安全规程"]["fastgpt"] == {"dataset_id": "ds1", "dataset_name": "安全规程"}
+    assert kbs[KB]["fastgpt"] is None
+    # 再次点击：直接返回已绑定的知识库
+    assert client.post("/api/fastgpt/datasets/ds1/kb").json() == {"name": "安全规程", "created": False}
+    # 同名但未绑定的知识库：绑定它，不新建
+    client.post("/api/kbs", json={"name": "设备手册"})
+    assert client.post("/api/fastgpt/datasets/ds2/kb").json() == {"name": "设备手册", "created": False}
+    assert client.get("/api/kbs/设备手册/fastgpt").json()["dataset"]["id"] == "ds2"
+    # 不存在的知识库
+    assert client.post("/api/fastgpt/datasets/nope/kb").status_code >= 400
+
+
+def test_kb_from_dataset_name_taken(client, fake):
+    client.post("/api/kbs", json={"name": "安全规程"})
+    client.put("/api/kbs/安全规程/fastgpt", json={"dataset_id": "ds2"})
+    assert client.post("/api/fastgpt/datasets/ds1/kb").json() == {"name": "安全规程(2)", "created": True}
+
+
+def test_kb_name_from():
+    assert storage.kb_name_from("部门 / 规程") == "部门 - 规程"
+    assert storage.kb_name_from("..x") == "x"
+    assert storage.kb_name_from("  ") == "知识库"
+    assert len(storage.kb_name_from("长" * 100)) == 64
+
+
 def test_wrong_key(client, monkeypatch):
     monkeypatch.setenv("STRATUM_FASTGPT_API_KEY", "wrong")
     r = client.get("/api/fastgpt/datasets")

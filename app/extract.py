@@ -80,6 +80,15 @@ def _ocr_wrapper(page, **kwargs):
     return _OCR_FUNC(page, **kwargs)
 
 
+def _full_ocr(img):
+    """替换 pymupdf4llm 的 rapidocr_onnx_backend.full_ocr：页面上没有识别出任何文字时（只有图形、印章），
+    RapidOCR 返回 None，原实现直接遍历导致整份文档解析失败。这里返回空列表，按「这页没有文字」处理。"""
+    from pymupdf4llm.ocr import rapidocr_onnx_backend
+
+    results, _elapse = rapidocr_onnx_backend.init_engine()(img)
+    return [(box, text, float(score)) for box, text, score in results or []]
+
+
 def worker_init():
     """进程初始化：限制单进程线程数，预加载版面模型与 OCR 模型。"""
     global _OCR_FUNC
@@ -95,6 +104,8 @@ def worker_init():
         if threads:
             kwargs["intra_op_num_threads"] = int(threads)
         rapidocr_onnx_backend.ENGINE = RapidOCR(**kwargs)
+        if rapidocr_api.full_ocr is rapidocr_onnx_backend.full_ocr:
+            rapidocr_api.full_ocr = _full_ocr
         _OCR_FUNC = rapidocr_api.exec_ocr
         # 用一页小图预热模型，避免首个任务等待
         doc = pymupdf.open()

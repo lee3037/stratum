@@ -380,3 +380,20 @@ def test_picture_crop_ignores_ocr_text_layer(tmp_path):
     assert pages[0]["ocr"] and pics
     clean = images.save_region(pymupdf.open(pdf)[0], pics[0]["bbox"], str(out_dir))
     assert clean["name"] == pics[0]["image"]["name"]
+
+
+@pytest.mark.parametrize("mode", ["auto", "force"])
+def test_ocr_page_without_any_text(tmp_path, mode):
+    """需要 OCR、但整页识别不出文字（只有图形或印章）时，RapidOCR 返回 None，不能让整份文档失败。"""
+    from app import extract
+
+    src = pymupdf.open()
+    p0 = src.new_page(width=300, height=300)
+    p0.draw_circle((150, 150), 100, color=(0.9, 0.1, 0.1), width=8)
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(150, 200, 450, 500), stream=p0.get_pixmap(dpi=100).tobytes("png"))
+    pdf = tmp_path / "notext.pdf"
+    doc.save(pdf)
+    pages = extract.extract_pages(str(pdf), [0], mode, 200)
+    assert len(pages) == 1

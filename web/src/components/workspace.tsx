@@ -60,8 +60,8 @@ interface WorkspaceProps {
   /** 删除左侧列表中的单个 PDF（打开确认） */
   onDeletePath: (path: string) => void
   onSettings: () => void
-  /** 当前版本在 FastGPT 中的导入状态与导入按钮 */
-  importStatus: ReactNode
+  /** 当前版本在 FastGPT 中的导入状态（第二行）与导入按钮（工具栏） */
+  importStatus: ImportStatus | null
   markdown: string
   separator: string
   onMarkdown: (md: string) => void
@@ -243,9 +243,14 @@ function DocStats({ result, chunks }: { result: ConvertResult | null; chunks: nu
 
 type Tab = "chunks" | "markdown" | "preview"
 
+export interface ImportStatus {
+  status: ReactNode
+  action: ReactNode
+}
+
 interface ResultViewProps {
   actions: ReactNode
-  importStatus: ReactNode
+  importStatus: ImportStatus | null
   busy: boolean
   result: ConvertResult | null
   markdown: string
@@ -261,6 +266,10 @@ function ResultView({ actions, importStatus, busy, result, markdown, separator, 
   // 最近一次删除块：markdown 仍是删除后的内容时才可撤销
   const [undo, setUndo] = useState<{ before: string; after: string } | null>(null)
   const chunks = useMemo(() => splitChunks(markdown, separator), [markdown, separator])
+  // 筛选的那类块全部删掉或改好后，筛选栏会消失；这时回到「全部」，否则列表一片空白
+  const shown: ChunkFilter =
+    (filter === "over" && !chunks.some((c) => c.length > draft.max_chars)) ||
+    (filter === "short" && !chunks.some((c) => c.length < draft.min_chars)) ? "all" : filter
 
   const changeChunks = (next: string[], removed = false) => {
     const md = joinChunks(next, separator)
@@ -284,7 +293,10 @@ function ResultView({ actions, importStatus, busy, result, markdown, separator, 
             value={tab}
             variant="Segmented"
           />
-          <div className="ml-auto flex min-w-0 flex-1 justify-end">{actions}</div>
+          <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
+            {actions}
+            {importStatus?.action}
+          </div>
           <div className="flex min-h-8 w-full flex-wrap items-center gap-2">
             {tab === "chunks" && (
               <ChunkFilterBar
@@ -292,11 +304,11 @@ function ResultView({ actions, importStatus, busy, result, markdown, separator, 
                 maxChars={draft.max_chars}
                 minChars={draft.min_chars}
                 onChange={setFilter}
-                value={filter}
+                value={shown}
               />
             )}
             <div className="ml-auto flex items-center gap-3">
-              {importStatus}
+              {importStatus?.status}
               <DocStats chunks={chunks.length} result={result} />
             </div>
           </div>
@@ -308,7 +320,7 @@ function ResultView({ actions, importStatus, busy, result, markdown, separator, 
           <div className="mx-auto max-w-3xl">
             <ChunkList
               chunks={chunks}
-              filter={filter}
+              filter={shown}
               maxChars={draft.max_chars}
               minChars={draft.min_chars}
               onChange={changeChunks}

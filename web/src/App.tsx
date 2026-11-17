@@ -21,7 +21,7 @@ import { KbPicker } from "@/components/kb-picker"
 import { KbSettingsDrawer } from "@/components/kb-settings-drawer"
 import { DeleteFileDrawer } from "@/components/delete-confirm"
 import type { Pending } from "@/components/stage"
-import { Workspace, type Doc, type Preview } from "@/components/workspace"
+import { Workspace, type Doc, type ImportStatus, type Preview } from "@/components/workspace"
 
 const sameExceptSeparator = (a: ChunkOptions, b: ChunkOptions) =>
   (Object.keys(a) as (keyof ChunkOptions)[]).every((k) => k === "separator" || a[k] === b[k])
@@ -626,28 +626,13 @@ export default function App() {
     await importVersion(project, current.pdfPath, current.path)
   }
 
-  const importStatus = (() => {
+  const importStatus: ImportStatus | null = (() => {
     if (!project?.fastgpt.configured || !current) return null
     const saved = current.saved && !current.unsaved
-    const button = (
-      <Hint label={saved ? "把这个版本导入绑定的 FastGPT 知识库" : "保存到知识库，并导入绑定的 FastGPT 知识库"}>
-        <Button
-          aria-label="导入 FastGPT"
-          className="rounded-full"
-          disabled={importing || busy || saveState === "loading"}
-          onClick={importCurrent}
-          size="xs"
-          variant="outline"
-        >
-          {importing ? <LoaderCircle className="animate-spin" /> : <Send />}
-          {importing ? "导入中" : saved ? "导入 FastGPT" : "保存并导入 FastGPT"}
-        </Button>
-      </Hint>
-    )
-    if (!project.fastgpt.dataset) return button
-    const record = project.fastgpt.imports[current.pdfPath]
+    const record = project.fastgpt.dataset ? project.fastgpt.imports[current.pdfPath] : undefined
     let text = "未导入 FastGPT"
     let tone = "text-muted-foreground"
+    let done = false // 当前版本已导入且没有改动：按钮不再抢眼
     if (record?.error) {
       text = "FastGPT 导入失败"
       tone = "text-red-600 dark:text-red-400"
@@ -656,16 +641,30 @@ export default function App() {
       const changed = current.unsaved || (!!record.md_etag && record.md_etag !== current.etag)
       text = changed ? "已修改，需重新导入" : `已导入 FastGPT${record.chunks != null ? ` · ${record.chunks} 块` : ""}`
       tone = changed ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
+      done = !changed
     } else if (record) {
       text = `FastGPT 中为 ${baseName(record.md_path)}`
       tone = "text-amber-600 dark:text-amber-400"
     }
-    return (
-      <span className="flex items-center gap-2">
-        <span className={`whitespace-nowrap text-xs ${tone}`} title={record?.error ?? undefined}>{text}</span>
-        {button}
-      </span>
+    const action = (
+      <Hint label={saved ? "把这个版本导入绑定的 FastGPT 知识库" : "保存到知识库，并导入绑定的 FastGPT 知识库"}>
+        <Button
+          aria-label="导入 FastGPT"
+          className={done ? "rounded-full" : "rounded-full bg-sky-500 text-white shadow-sm hover:bg-sky-600"}
+          disabled={importing || busy || saveState === "loading"}
+          onClick={importCurrent}
+          size="sm"
+          variant={done ? "outline" : "default"}
+        >
+          {importing ? <LoaderCircle className="animate-spin" /> : <Send />}
+          {importing ? "导入中" : saved ? "导入 FastGPT" : "保存并导入 FastGPT"}
+        </Button>
+      </Hint>
     )
+    const status = project.fastgpt.dataset
+      ? <span className={`whitespace-nowrap text-xs ${tone}`} title={record?.error ?? undefined}>{text}</span>
+      : null
+    return { status, action }
   })()
 
   // 保存按钮的成功 / 失败状态停留片刻后恢复

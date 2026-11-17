@@ -177,3 +177,20 @@ def test_shutdown_then_start_again():
     pool.start()
     assert pool.submit("a", INTERACTIVE, _square, 3).result(5) == 9
     pool.shutdown()
+
+
+def test_layout_model_threads_limited():
+    """版面分析模型在导入 pymupdf 时就创建 ONNX 会话，线程限制必须在那之前生效。"""
+    import subprocess
+
+    code = (
+        "import gc, onnxruntime as ort\n"
+        "from app import extract\n"
+        "base = getattr(ort.InferenceSession, '_stratum_base', ort.InferenceSession)\n"
+        "extract.extract_pages('samples/text_cn.pdf', [0], 'off', 200)\n"
+        "n = [o.get_session_options().intra_op_num_threads for o in gc.get_objects() if isinstance(o, base)]\n"
+        "assert n and all(x == 3 for x in n), n\n"
+    )
+    env = {**os.environ, "STRATUM_OCR_THREADS": "3", "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parents[1]), env=env, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-2000:]

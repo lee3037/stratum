@@ -5,8 +5,8 @@ import type { ChunkOptions, ConvertOptions, ParserInfo } from "@/lib/api"
 import { DEFAULT_CHUNK, DEFAULT_CONVERT, getJob, rechunk } from "@/lib/api"
 import type { MarkdownFile, Project, UploadItem } from "@/lib/library"
 import {
-  createBatch, getSettings, importToFastgpt, itemsFromDrop, nextMarkdownFile, openKb, overwriteMarkdown, pdfUrl, readMarkdown, rescan,
-  saveVersion, startKbJob, summarizeUpload, uploadFiles,
+  createBatch, deleteFiles, getSettings, importToFastgpt, itemsFromDrop, nextMarkdownFile, openKb, overwriteMarkdown, pdfUrl, readMarkdown, rescan,
+  saveVersion, startKbJob, summarizeDelete, summarizeUpload, uploadFiles,
 } from "@/lib/library"
 import { loadSeparators } from "@/lib/separators"
 import { useParsers } from "@/lib/use-parsers"
@@ -731,6 +731,32 @@ export default function App() {
     }
   }
 
+  // 删除 PDF 及其全部版本；关闭属于这些 PDF 的结果与预览，返回已删除的路径
+  const removeFiles = async (paths: string[], withFastgpt: boolean): Promise<string[]> => {
+    if (!project) return []
+    try {
+      const results = await deleteFiles(project.name, paths, withFastgpt)
+      const problems = results.filter((r) => r.status !== "deleted")
+      toast({
+        title: summarizeDelete(results),
+        description: problems.slice(0, 3).map((r) => `${r.path}：${r.message}`).join("\n") || undefined,
+        status: problems.some((r) => r.status === "error") ? "error" : problems.length ? "info" : "success",
+        duration: problems.length ? 10000 : 4000,
+      })
+      const gone = new Set(results.filter((r) => r.status === "deleted").map((r) => r.path))
+      if (gone.size) {
+        if (current && gone.has(current.pdfPath)) setActiveArtifact(null)
+        setArtifacts((items) => items.filter((item) => !gone.has(item.pdfPath)))
+        setPreview((p) => (p && gone.has(p.path) ? null : p))
+      }
+      setProject(await rescan(project).catch(() => project))
+      return [...gone]
+    } catch (e) {
+      fail("删除失败", e)
+      return []
+    }
+  }
+
   if (booting) return <div className="h-svh bg-muted/30" />
 
   return (
@@ -742,6 +768,7 @@ export default function App() {
             <BatchStage
               latestBatch={latestBatch}
               onClose={() => setBatchOpen(false)}
+              onDelete={removeFiles}
               onOpen={(mdPath) => void selectArtifact(mdPath)}
               onProgress={refreshQuietly}
               onSettings={openSettings}
@@ -803,6 +830,11 @@ export default function App() {
             ? startBatch(drawer.batch.paths, drawer.batch.skipConverted, settings)
             : drawer.reparse ? reparse(settings) : parse(drawer.path, settings)}
           onPreview={() => previewPath(drawer.path)}
+          onDelete={drawer.batch || drawer.reparse ? undefined : async (withFastgpt) => {
+            if ((await removeFiles([drawer.path], withFastgpt)).length) closeDrawer()
+          }}
+          imported={!!project.fastgpt.dataset && !!project.fastgpt.imports[drawer.path]}
+          dataset={project.fastgpt.dataset?.name}
           open={drawer.open}
           path={drawer.path}
           reparse={drawer.reparse}

@@ -1,5 +1,5 @@
-import { useMemo, useRef } from "react"
-import { FilePlus2, FolderUp, ListChecks, RefreshCw } from "lucide-react"
+import { useMemo, useRef, useState } from "react"
+import { FilePlus2, FolderUp, ListChecks, RefreshCw, Search, X } from "lucide-react"
 
 import type { Project, UploadItem } from "@/lib/library"
 import { itemsFromInput } from "@/lib/library"
@@ -26,11 +26,13 @@ interface ProjectNavProps {
 /** 左栏上半部分：知识库中的全部 PDF。 */
 export function ProjectNav({ project, active, locked, uploading, onSelect, onRefresh, onUpload, onBatch, batchOpen }: ProjectNavProps) {
   const filesRef = useRef<HTMLInputElement>(null)
+  const [query, setQuery] = useState("")
+  const q = query.trim().toLowerCase()
   const pending = useMemo(() => new Set(project.fastgpt.pending), [project.fastgpt.pending])
   const folderRef = useRef<HTMLInputElement>(null)
   const items = useMemo(
     () =>
-      project.files.map((f) => ({
+      project.files.filter((f) => !q || f.path.toLowerCase().includes(q)).map((f) => ({
         label: f.path,
         href: `#${encodeURIComponent(f.path)}`,
         icon: <PdfIcon />,
@@ -40,7 +42,7 @@ export function ProjectNav({ project, active, locked, uploading, onSelect, onRef
               : !project.fastgpt.dataset ? "已转换"
                 : project.fastgpt.imports[f.path] && !pending.has(f.path) ? "已导入" : "待导入",
       })),
-    [project.files, project.active, project.fastgpt, pending]
+    [project.files, project.active, project.fastgpt, pending, q]
   )
   const converted = project.files.filter((f) => f.converted).length
   const percent = uploading && uploading.total ? Math.round((uploading.loaded / uploading.total) * 100) : 0
@@ -120,6 +122,24 @@ export function ProjectNav({ project, active, locked, uploading, onSelect, onRef
           </Button>
         </Hint>
       </div>
+      {(project.files.length > 8 || query) && (
+        <label className="mx-4 mb-2 flex h-8 items-center gap-2 rounded-lg border border-border bg-background px-2.5 text-sm focus-within:ring-2 focus-within:ring-ring">
+          <Search className="size-4 shrink-0 text-muted-foreground" />
+          <input
+            aria-label="搜索 PDF"
+            className="min-w-0 flex-1 bg-transparent outline-none"
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            placeholder="搜索文件名或文件夹"
+            value={query}
+          />
+          {query && (
+            <button aria-label="清除搜索" className="text-muted-foreground hover:text-foreground" onClick={() => setQuery("")} type="button">
+              <X className="size-3.5" />
+            </button>
+          )}
+        </label>
+      )}
       {uploading && (
         <div className="mx-5 mb-2 h-1 overflow-hidden rounded-full bg-muted">
           <div className="h-full bg-sky-500 transition-[width]" style={{ width: `${percent}%` }} />
@@ -137,7 +157,9 @@ export function ProjectNav({ project, active, locked, uploading, onSelect, onRef
             }}
           />
         ) : (
-          <p className="px-3 py-2 text-sm text-muted-foreground">知识库中还没有 PDF，点击右上角上传</p>
+          <p className="px-3 py-2 text-sm text-muted-foreground">
+            {project.files.length ? "没有符合条件的 PDF" : "知识库中还没有 PDF，点击右上角上传"}
+          </p>
         )}
       </div>
     </div>

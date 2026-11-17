@@ -11,9 +11,45 @@ import contextlib
 import io
 import os
 
-import pymupdf
 
-from . import images
+def _limit_onnx_threads(threads: int) -> None:
+    """版面分析模型（pymupdf.layout）创建 ONNX 会话时不限制线程数，默认每个会话占满全部物理核。
+    多个解析进程同时运行时线程数成倍超过 CPU 核数，互相争抢，速度反而大幅下降。
+    这里让未指定线程数的会话都使用 STRATUM_OCR_THREADS 个线程。"""
+    import onnxruntime as ort
+
+    if getattr(ort.InferenceSession, "_stratum_threads", None) == threads:
+        return
+    base = getattr(ort.InferenceSession, "_stratum_base", ort.InferenceSession)
+
+    class _Session(base):
+        _stratum_base = base
+        _stratum_threads = threads
+
+        def __init__(self, path_or_bytes, sess_options=None, *args, **kwargs):
+            so = sess_options if sess_options is not None else ort.SessionOptions()
+            if not so.intra_op_num_threads:
+                so.intra_op_num_threads = threads
+            if not so.inter_op_num_threads:
+                so.inter_op_num_threads = 1
+            super().__init__(path_or_bytes, so, *args, **kwargs)
+
+    ort.InferenceSession = _Session
+
+
+def _apply_thread_limit() -> None:
+    threads = os.environ.get("STRATUM_OCR_THREADS")
+    if threads and threads.isdigit() and int(threads) > 0:
+        os.environ.setdefault("OMP_NUM_THREADS", threads)
+        _limit_onnx_threads(int(threads))
+
+
+# 必须在导入 pymupdf 之前：导入 pymupdf 时就会加载版面分析模型并创建 ONNX 会话
+_apply_thread_limit()
+
+import pymupdf  # noqa: E402
+
+from . import images  # noqa: E402
 
 _OCR_PAGES: set[int] = set()
 _OCR_FUNC = None
@@ -47,9 +83,8 @@ def _ocr_wrapper(page, **kwargs):
 def worker_init():
     """进程初始化：限制单进程线程数，预加载版面模型与 OCR 模型。"""
     global _OCR_FUNC
+    _apply_thread_limit()
     threads = os.environ.get("STRATUM_OCR_THREADS")
-    if threads:
-        os.environ.setdefault("OMP_NUM_THREADS", threads)
     with contextlib.redirect_stdout(io.StringIO()):
         import pymupdf4llm  # noqa: F401  (激活 pymupdf.layout)
         from pymupdf4llm.ocr import rapidocr_api, rapidocr_onnx_backend
@@ -300,7 +335,7 @@ def _fill_empty_ocr_cells(page, rows, cells, limit=150):
     return filled
 
 
-def _convert_page(doc, pl, ocr_pages, image_dir: str | None = None) -> dict:
+def _convert_page(doc, pl, ocr_pages, image_dir: str | None = None, pristine=None) -> dict:
     page_index = pl.page_number - 1
     # 可见文字充足、又叠加了一层不可见文字（旧 OCR 层）时，丢弃不可见文字，避免内容重复和错字
     page = doc[page_index]
@@ -347,7 +382,9 @@ def _convert_page(doc, pl, ocr_pages, image_dir: str | None = None) -> dict:
                     b["table"] = {"rows": hit[0], "source": "lines", "col_x": hit[2], "hspan": hit[3]}
             if image_dir:
                 try:
-                    b["image"] = images.save_region(page, b["bbox"], image_dir)
+                    # OCR 会把识别出的文字写回页面（可见），截图要用未经修改的原文档，否则图中文字重影
+                    src = pristine[page_index] if pristine is not None else page
+                    b["image"] = images.save_region(src, b["bbox"], image_dir)
                 except Exception:  # noqa: BLE001  单张图片失败不影响整页
                     b["image"] = None
         out_boxes.append(b)
@@ -366,6 +403,8 @@ def extract_pages(path: str, pages: list[int], ocr_mode: str = "auto", ocr_dpi: 
     """解析指定页（0 基）。在工作进程中调用。image_dir：保存图片区域的目录，None 表示不提取图片。"""
     if _OCR_FUNC is None and ocr_mode != "off":
         worker_init()
+    else:
+        _apply_thread_limit()
     global _FORCE_OCR
     _FORCE_OCR = ocr_mode == "force"
     _OCR_PAGES.clear()
@@ -374,7 +413,14 @@ def extract_pages(path: str, pages: list[int], ocr_mode: str = "auto", ocr_dpi: 
         raise ValueError("PDF 已加密，无法读取")
     with contextlib.redirect_stdout(io.StringIO()):
         parsed = _parse(doc, pages, ocr_mode, ocr_dpi)
-    result = [_convert_page(doc, pl, set(_OCR_PAGES), image_dir) for pl in parsed.pages]
+    pristine = pymupdf.open(path) if image_dir else None
+    if pristine is not None and pristine.needs_pass:
+        pristine.authenticate("")
+    try:
+        result = [_convert_page(doc, pl, set(_OCR_PAGES), image_dir, pristine) for pl in parsed.pages]
+    finally:
+        if pristine is not None:
+            pristine.close()
     doc.close()
     return result
 

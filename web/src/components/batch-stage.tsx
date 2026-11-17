@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDown, ChevronRight, Download, Layers, LoaderCircle, RotateCcw, Search, Send, Square, X } from "lucide-react"
+import { ChevronDown, ChevronRight, Download, Layers, LoaderCircle, RotateCcw, Search, Send, Square, Trash2, X } from "lucide-react"
 
 import type { Batch, BatchItem, ConflictPolicy, ExportMode, ImportJob, Project } from "@/lib/library"
 import { cancelBatch, downloadZip, getBatch, getImportJob, listBatches, retryBatch, startImportJob } from "@/lib/library"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
+import { DeleteConfirm } from "@/components/delete-confirm"
 import { Button } from "@/components/ui/button"
 import { Hint } from "@/components/hint"
 import { toast } from "@/components/toaster"
@@ -24,6 +25,8 @@ interface BatchStageProps {
   onClose: () => void
   /** 新提交的批次编号；变化时立即刷新并展开 */
   latestBatch: string | null
+  /** 删除所选 PDF（及其全部版本）；withFastgpt 时同时删除 FastGPT 集合。返回已删除的路径 */
+  onDelete: (paths: string[], withFastgpt: boolean) => Promise<string[]>
 }
 
 const fail = (title: string, e: unknown) =>
@@ -50,8 +53,9 @@ const formatBytes = (n: number) =>
 const formatTime = (t: number) => new Date(t * 1000).toLocaleString("zh-CN", { hour12: false })
 
 /** 主区域的批量处理视图：勾选文件 → 批量解析或打包下载；下方显示最近的批次进度。 */
-export function BatchStage({ project, onStart, onProgress, onOpen, onSettings, onClose, latestBatch }: BatchStageProps) {
+export function BatchStage({ project, onStart, onProgress, onOpen, onSettings, onClose, latestBatch, onDelete }: BatchStageProps) {
   const [query, setQuery] = useState("")
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [filter, setFilter] = useState<Filter>("all")
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [skipConverted, setSkipConverted] = useState(true)
@@ -269,7 +273,16 @@ export function BatchStage({ project, onStart, onProgress, onOpen, onSettings, o
               跳过已转换的文件
             </label>
             <Button
-              className="ml-auto bg-sky-500 text-white hover:bg-sky-600"
+              className="ml-auto text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/30"
+              disabled={!chosen.length || confirmDelete}
+              onClick={() => setConfirmDelete(true)}
+              variant="ghost"
+            >
+              <Trash2 />
+              删除所选（{chosen.length}）
+            </Button>
+            <Button
+              className="bg-sky-500 text-white hover:bg-sky-600"
               disabled={!chosen.length}
               onClick={() => onStart(chosen, skipConverted)}
             >
@@ -277,6 +290,19 @@ export function BatchStage({ project, onStart, onProgress, onOpen, onSettings, o
               批量解析（{chosen.length}）
             </Button>
           </div>
+          {confirmDelete && chosen.length > 0 && (
+            <DeleteConfirm
+              count={chosen.length}
+              dataset={dataset?.name}
+              imported={dataset ? chosen.filter((p) => imports[p]).length : 0}
+              onCancel={() => setConfirmDelete(false)}
+              onConfirm={async (withFastgpt) => {
+                const deleted = new Set(await onDelete(chosen, withFastgpt))
+                setSelected((s) => new Set([...s].filter((p) => !deleted.has(p))))
+                setConfirmDelete(false)
+              }}
+            />
+          )}
 
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-border border-t pt-3">
             <span className="text-sm font-medium">打包下载</span>

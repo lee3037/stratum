@@ -230,6 +230,32 @@ export async function createBatch(kb: string, paths: string[], settings: KbSetti
   return json<Batch>(await fetch(kbUrl(kb, "/batches"), send("POST", { paths, settings, skip_converted: skipConverted })))
 }
 
+export interface DeleteResult {
+  path: string
+  status: "deleted" | "skipped" | "error"
+  message?: string
+  /** FastGPT 集合：deleted 已删除 / kept 保留 / null 未导入 */
+  fastgpt?: "deleted" | "kept" | null
+}
+
+/** 删除 PDF 及其全部 Markdown 版本；withFastgpt 时同时删除 FastGPT 中由本系统导入的集合 */
+export async function deleteFiles(kb: string, paths: string[], withFastgpt: boolean) {
+  return (await json<{ results: DeleteResult[] }>(
+    await fetch(kbUrl(kb, "/files/delete"), send("POST", { paths, fastgpt: withFastgpt })),
+  )).results
+}
+
+export function summarizeDelete(results: DeleteResult[]) {
+  const n = (s: DeleteResult["status"]) => results.filter((r) => r.status === s).length
+  const removed = results.filter((r) => r.fastgpt === "deleted").length
+  return [
+    `已删除 ${n("deleted")} 个`,
+    removed && `同时删除 FastGPT 集合 ${removed} 个`,
+    n("skipped") && `跳过 ${n("skipped")} 个（正在解析）`,
+    n("error") && `失败 ${n("error")} 个`,
+  ].filter(Boolean).join("，")
+}
+
 export async function listBatches(kb: string) {
   return (await json<{ batches: Batch[] }>(await fetch(kbUrl(kb, "/batches")))).batches
 }

@@ -253,6 +253,35 @@ def _update_record(kb: Path, dataset_id: str, pdf_rel: str, record: dict | None)
         storage._write_json(kb, _records_path(kb), data)
 
 
+def forget_pdf(client: Client, kb: Path, pdf_rel: str, delete_collection: bool) -> str | None:
+    """删除 PDF 前处理它在 FastGPT 中的集合与导入记录。
+
+    delete_collection 为 True 时删除当前绑定知识库中由本系统导入的集合；FastGPT 中已找不到该集合时视为已删除。
+    删除失败时抛出 FastGPTError，调用方据此保留本地文件，便于重试。返回 "deleted" / "kept" / None（未导入）。"""
+    bound = binding(kb)
+    record = read_records(kb, bound["dataset_id"]).get(pdf_rel) if bound else None
+    collection_id = (record or {}).get("collection_id")
+    outcome = None
+    if collection_id:
+        outcome = "kept"
+        if delete_collection:
+            try:
+                client.delete_collection(collection_id)
+            except FastGPTError:
+                name = record.get("collection_name") or collection_name(pdf_rel)
+                if any(c.get("_id") == collection_id for c in client.find_collections(bound["dataset_id"], name)):
+                    raise
+            outcome = "deleted"
+    with _records_lock:
+        data = storage._read_json(_records_path(kb), {})
+        if isinstance(data, dict) and any(isinstance(b, dict) and pdf_rel in b for b in data.values()):
+            for bucket in data.values():
+                if isinstance(bucket, dict):
+                    bucket.pop(pdf_rel, None)
+            storage._write_json(kb, _records_path(kb), data)
+    return outcome
+
+
 def collection_name(pdf_rel: str) -> str:
     """集合名为去掉 .pdf 的路径。不加扩展名：FastGPT 会给文本集合自动加 .txt，加 .md 会变成 .md.txt。"""
     return re.sub(r"\.pdf$", "", pdf_rel, flags=re.I)

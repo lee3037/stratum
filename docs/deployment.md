@@ -50,7 +50,7 @@ Stratum 只用 CPU，不占显存，可以和大模型、FastGPT 部署在同一
 | `STRATUM_DATA_DIR` | 项目目录下的 `data/library` | 文件库根目录。每个子目录是一个知识库，PDF 和解析结果都保存在这里。 |
 | `STRATUM_WORKERS` | 8 核及以下：CPU 核数 / 2，取 1 至 3；更多核：CPU 核数 / 4，取 3 至 16 | 解析进程数。每个进程占用 350 MB 内存。 |
 | `STRATUM_BATCH_CONCURRENCY` | 解析进程数 / 6，取 1 至 4 | 同时批量解析的文件数。每个文件的页面仍由全部解析进程并行处理。 |
-| `STRATUM_OCR_THREADS` | CPU 核数 / 进程数 | 每个进程的 OCR 线程数 |
+| `STRATUM_OCR_THREADS` | CPU 核数 / 进程数 | 每个解析进程的线程数，版面分析模型和 OCR 共用。解析进程数 × 线程数不要超过分给 Stratum 的核数，否则线程互相争抢反而更慢。 |
 | `STRATUM_MAX_MB` | 200 | 上传文件大小上限，单位 MB |
 | `STRATUM_MAX_PAGES` | 2000 | 页数上限 |
 | `STRATUM_JOB_TTL` | 10800 | 任务结果和上传文件的保留时长，单位秒 |
@@ -128,7 +128,7 @@ PDF 中的图片保存在 `STRATUM_DATA_DIR/.images/`，Markdown 中以绝对地
 
 **备份**：只需备份 `STRATUM_DATA_DIR`。`.images/` 是所有知识库共用的图片库，Markdown 与 FastGPT 中的图片链接都指向它，不要删除。每个知识库目录包含 PDF、各版本 Markdown，以及 `.stratum/` 下的版本信息、默认参数、FastGPT 绑定与导入记录、批量记录。`STRATUM_WORK_DIR` 只存临时文件，不需要备份。
 
-**整理文件**：管理员可以直接在服务器上移动或删除知识库目录中的文件（界面不提供删除）。删除 PDF 时一并删除同名的 `_vN.md`；FastGPT 中对应的集合需要在 FastGPT 中手动删除。
+**整理文件**：在界面中删除 PDF 见[使用指南](guide.md#删除-pdf)。管理员也可以直接在服务器上移动或删除知识库目录中的文件；这样删除 PDF 时要一并删除同名的 `_vN.md`，FastGPT 中对应的集合需要在 FastGPT 中手动删除。
 
 **资源上限**：`deploy/stratum.service` 默认限制最多 32 核、24 GB 内存。每个解析进程约 350 MB，16 个进程加上服务本身约 8 GB；处理大量扫描件时内存会更高。如果日志中出现进程崩溃且 `pool.restarts` 增长，适当调高 `MemoryMax` 或减少 `STRATUM_WORKERS`。
 

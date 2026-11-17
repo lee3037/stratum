@@ -328,3 +328,39 @@ def test_concurrent_imports_of_same_pdf_create_one_collection(client, fake):
         t.join(10)
     assert sorted(results) == ["imported", "unchanged", "unchanged", "unchanged"]
     assert len(fake.collections) == 1
+
+
+def test_delete_files_with_and_without_collection(client, fake):
+    client.put(f"/api/kbs/{KB}/fastgpt", json={"dataset_id": "ds1"})
+    kb = storage.kb_dir(KB)
+    for pdf in ("a.pdf", "sub/b.pdf"):
+        save(pdf, text("一", "二"))
+        save(pdf, text("一", "二", "三"))
+        assert client.post(f"/api/kbs/{KB}/fastgpt/import", json={"pdf_path": pdf}).json()["status"] == "imported"
+    ids = {p: fastgpt.read_records(kb, "ds1")[p]["collection_id"] for p in ("a.pdf", "sub/b.pdf")}
+
+    # FastGPT 删除失败：本地文件保留，可以重试
+    fake.fail_delete = True
+    r = client.post(f"/api/kbs/{KB}/files/delete", json={"paths": ["sub/b.pdf"], "fastgpt": True}).json()
+    assert r["results"][0]["status"] == "error" and (kb / "sub/b.pdf").exists()
+    fake.fail_delete = False
+
+    r = client.post(f"/api/kbs/{KB}/files/delete", json={"paths": ["sub/b.pdf"], "fastgpt": True}).json()["results"][0]
+    assert r["status"] == "deleted" and r["fastgpt"] == "deleted"
+    assert sorted(r["removed"]) == ["sub/b.pdf", "sub/b_v1.md", "sub/b_v2.md"]
+    assert ids["sub/b.pdf"] not in fake.collections and not (kb / "sub").exists()
+    assert not (kb / ".stratum/meta/sub/b_v1.md.json").exists()
+
+    # 只删 Stratum：FastGPT 集合保留，导入记录清除
+    r = client.post(f"/api/kbs/{KB}/files/delete", json={"paths": ["a.pdf"], "fastgpt": False}).json()["results"][0]
+    assert r["status"] == "deleted" and r["fastgpt"] == "kept" and ids["a.pdf"] in fake.collections
+    assert fastgpt.read_records(kb, "ds1") == {}
+
+    # 未导入的文件；FastGPT 中集合已被手动删除时也能删除本地文件
+    save("c.pdf", text("一"))
+    client.post(f"/api/kbs/{KB}/fastgpt/import", json={"pdf_path": "c.pdf"})
+    fake.collections.clear()
+    fake.fail_delete = True
+    r = client.post(f"/api/kbs/{KB}/files/delete", json={"paths": ["c.pdf", "missing.pdf"], "fastgpt": True}).json()["results"]
+    assert r[0]["status"] == "deleted" and r[1]["status"] == "error"
+    assert [f["path"] for f in client.get(f"/api/kbs/{KB}/files").json()["files"]] == []

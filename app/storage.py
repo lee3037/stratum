@@ -551,6 +551,25 @@ def pdf_path(kb: Path, rel: str) -> Path:
     return path
 
 
+def delete_pdf(kb: Path, pdf_rel: str) -> list[str]:
+    """删除 PDF 及其全部 Markdown 版本与版本信息，返回删除的文件路径。删空的子文件夹一并删除。"""
+    rel = clean_rel(pdf_rel)
+    pdf = pdf_path(kb, rel)
+    removed = []
+    for v in versions_of(kb, rel):
+        resolve(kb, v["path"]).unlink(missing_ok=True)
+        _meta_path(kb, v["path"]).unlink(missing_ok=True)
+        removed.append(v["path"])
+    pdf.unlink()
+    removed.append(rel)
+    folder = pdf.parent
+    root = kb.resolve()
+    while folder.resolve() != root and folder.is_dir() and not any(folder.iterdir()):
+        folder.rmdir()
+        folder = folder.parent
+    return removed
+
+
 def cleanup_tmp(kb: Path, older_than: float = 3600) -> None:
     folder = kb / META_DIR / "tmp"
     if not folder.is_dir():

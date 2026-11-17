@@ -361,6 +361,42 @@ def upload_files(kb: str, files: list[UploadFile] = File(...), paths: list[str] 
     return {"results": results}
 
 
+class DeleteBody(BaseModel):
+    paths: list[str]
+    fastgpt: bool = False  # 同时删除 FastGPT 中由本系统导入的集合
+
+
+@app.post("/api/kbs/{kb}/files/delete")
+def delete_files(kb: str, body: DeleteBody):
+    """删除 PDF 及其全部 Markdown 版本。先处理 FastGPT 集合，失败时保留本地文件以便重试；
+    正在解析（单个或批量）的文件不删除。"""
+    folder = storage.kb_dir(kb)
+    active = batches.active_paths(folder.name)
+    with _lock:
+        parsing = {j.get("path") for j in _jobs.values()
+                   if j.get("kb") == folder.name and j["status"] in ("queued", "running")}
+    results = []
+    for raw in dict.fromkeys(body.paths):
+        try:
+            rel = storage.clean_rel(raw)
+        except StorageError as exc:
+            results.append({"path": raw, "status": "error", "message": str(exc)})
+            continue
+        if rel in active or rel in parsing:
+            results.append({"path": rel, "status": "skipped", "message": "正在解析，完成后再删除"})
+            continue
+        try:
+            with fastgpt._pdf_lock(folder, rel):
+                storage.pdf_path(folder, rel)
+                collection = fastgpt.forget_pdf(fastgpt_client, folder, rel, body.fastgpt)
+                removed = storage.delete_pdf(folder, rel)
+        except StorageError as exc:
+            results.append({"path": rel, "status": "error", "message": str(exc)})
+            continue
+        results.append({"path": rel, "status": "deleted", "removed": removed, "fastgpt": collection})
+    return {"results": results}
+
+
 @app.get("/api/kbs/{kb}/pdf")
 def kb_pdf(kb: str, path: str):
     pdf = storage.pdf_path(storage.kb_dir(kb), path)

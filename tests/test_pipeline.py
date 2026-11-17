@@ -355,3 +355,28 @@ def test_image_chunk_rendering_and_url_warning(monkeypatch):
     assert f"(http://192.162.10.41:18080/api/images/{name})" in r["markdown"]
     assert not any("STRATUM_PUBLIC_URL" in w for w in r["warnings"])
     monkeypatch.setattr(images, "_seen_base", "")
+
+
+def test_picture_crop_ignores_ocr_text_layer(tmp_path):
+    """OCR 会把识别出的文字以可见文字写回页面；截图必须来自原文档，否则图中文字重影。"""
+    from app import extract, images
+
+    src = pymupdf.open()
+    p0 = src.new_page(width=320, height=200)
+    p0.draw_rect(pymupdf.Rect(0, 0, 320, 200), color=None, fill=(0.85, 0.92, 1))
+    p0.draw_rect(pymupdf.Rect(20, 20, 300, 180), color=(0, 0, 0), width=2)
+    for k, t in enumerate(["视频接入", "实时视频流", "数据类信号传输"]):
+        p0.insert_text((40, 60 + k * 40), t, fontname="china-s", fontsize=20)
+    raster = p0.get_pixmap(dpi=144).tobytes("png")
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(100, 150, 500, 400), stream=raster)
+    pdf = tmp_path / "scan.pdf"
+    doc.save(pdf)
+
+    out_dir = tmp_path / "img"
+    pages = extract.extract_pages(str(pdf), [0], "force", 200, str(out_dir))
+    pics = [b for b in pages[0]["boxes"] if b["cls"] == "picture" and b.get("image")]
+    assert pages[0]["ocr"] and pics
+    clean = images.save_region(pymupdf.open(pdf)[0], pics[0]["bbox"], str(out_dir))
+    assert clean["name"] == pics[0]["image"]["name"]

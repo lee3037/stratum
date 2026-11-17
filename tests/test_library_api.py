@@ -204,3 +204,14 @@ def test_image_endpoint_and_public_base(client, tmp_path, monkeypatch):
     monkeypatch.setenv("STRATUM_PUBLIC_URL", "http://stratum.example:8000/")
     assert images.url_for(name) == f"http://stratum.example:8000/api/images/{name}"
     monkeypatch.setattr(images, "_seen_base", "")
+
+
+def test_delete_skips_files_being_parsed(client, monkeypatch):
+    from app import server
+
+    pdf = (ROOT / "samples" / "text_cn.pdf").read_bytes()
+    upload(client, ("a.pdf", pdf), ("b.pdf", pdf))
+    monkeypatch.setattr(server.batches, "active_paths", lambda kb: {"a.pdf": "running"})
+    r = client.post(f"/api/kbs/{KB}/files/delete", json={"paths": ["a.pdf", "b.pdf"]}).json()["results"]
+    assert [(x["path"], x["status"]) for x in r] == [("a.pdf", "skipped"), ("b.pdf", "deleted")]
+    assert [f["path"] for f in client.get(f"/api/kbs/{KB}/files").json()["files"]] == ["a.pdf"]

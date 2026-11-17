@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Eye, Layers, X } from "lucide-react"
+import { Eye, Layers, Trash2, X } from "lucide-react"
 import { motion } from "motion/react"
 import useMeasure from "react-use-measure"
 import { Drawer } from "vaul"
@@ -9,6 +9,7 @@ import type { ParserCatalog } from "@/lib/use-parsers"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { SettingsPanel } from "@/components/settings-panel"
+import { DeleteConfirm } from "@/components/delete-confirm"
 
 /** 一次解析使用的全部参数 */
 export interface ParseSettings {
@@ -16,7 +17,7 @@ export interface ParseSettings {
   chunk: ChunkOptions
 }
 
-export type FileDrawerView = "menu" | "config"
+export type FileDrawerView = "menu" | "config" | "delete"
 
 interface FileDrawerProps {
   /** 知识库内的 PDF 相对路径 */
@@ -32,6 +33,11 @@ interface FileDrawerProps {
   reparse?: boolean
   /** 确认按钮文字；缺省为「开始解析」或「重新解析分块」 */
   confirmLabel?: string
+  /** 删除这个 PDF；不传时不显示删除 */
+  onDelete?: (withFastgpt: boolean) => Promise<void>
+  /** 已导入 FastGPT（删除时可选择同时删除集合） */
+  imported?: boolean
+  dataset?: string
 }
 
 const TONES = {
@@ -77,7 +83,7 @@ function Header({ title, onClose }: { title: string; onClose: () => void }) {
  * 点选 PDF 后弹出的底部抽屉：先选操作，再确认本次解析配置。
  * 改写自 Spectrum UI 的 Animated Drawer：切换内容时高度跟随实际内容平滑变化。
  */
-export function FileDrawer({ path, open, initialView, settings, catalog, onParse, onPreview, onClose, reparse = false, confirmLabel }: FileDrawerProps) {
+export function FileDrawer({ path, open, initialView, settings, catalog, onParse, onPreview, onClose, reparse = false, confirmLabel, onDelete, imported = false, dataset }: FileDrawerProps) {
   const [view, setView] = useState(initialView)
   const [draft, setDraft] = useState(settings)
   const { chunk, convert } = draft
@@ -122,10 +128,27 @@ export function FileDrawer({ path, open, initialView, settings, catalog, onParse
                     <Action icon={<Eye />} onClick={onPreview} tone="neutral">
                       预览原文件
                     </Action>
-                    <Action icon={<X />} onClick={onClose} tone="red">
+                    {onDelete && (
+                      <Action icon={<Trash2 />} onClick={() => setView("delete")} tone="red">
+                        删除文件
+                      </Action>
+                    )}
+                    <Action icon={<X />} onClick={onClose} tone={onDelete ? "neutral" : "red"}>
                       取消
                     </Action>
                   </div>
+                </>
+              ) : view === "delete" && onDelete ? (
+                <>
+                  <Header onClose={onClose} title={name} />
+                  <DeleteConfirm
+                    className="mt-6"
+                    count={1}
+                    dataset={dataset}
+                    imported={imported ? 1 : 0}
+                    onCancel={() => setView("menu")}
+                    onConfirm={onDelete}
+                  />
                 </>
               ) : (
                 <>

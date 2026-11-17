@@ -45,8 +45,6 @@ def version_link(page, name):
 
 
 def open_reparse(page):
-    page.get_by_role("group", name="Markdown 产物操作").hover()
-    page.wait_for_timeout(500)
     page.get_by_role("button", name="重新解析分块", exact=True).click()
     drawer = page.get_by_role("dialog")
     drawer.wait_for()
@@ -129,13 +127,11 @@ with sync_playwright() as p:
     checks["首次生成 v1"] = n0 > 0
     checks["未保存不写盘"] = not (DATA / KB / "complex_cn_v1.md").exists()
     bar = page.get_by_role("group", name="Markdown 产物操作")
-    page.mouse.move(5, 5)
-    page.wait_for_timeout(500)
     width = bar.bounding_box()["width"]
     copy = page.get_by_role("button", name="复制 Markdown", exact=True)
     copy.hover()
-    page.wait_for_timeout(500)
-    checks["操作栏悬停展开"] = bar.bounding_box()["width"] > width
+    page.locator("[data-slot=tooltip-content]", has_text="复制 Markdown").wait_for()
+    checks["操作栏悬停显示说明、不改变宽度"] = bar.bounding_box()["width"] == width
     copy.click()
     checks["复制 Markdown"] = "预算" in page.evaluate("navigator.clipboard.readText()")
     save_current(page)
@@ -372,7 +368,7 @@ with sync_playwright() as p:
         checks["返回知识库列表"] = True
     context.close()
 
-    # 触屏：先展开操作栏，再执行操作；没有 PDF 的旧 .md 兼容
+    # 触屏：点一下直接执行；没有 PDF 的旧 .md 兼容
     touch_context = browser.new_context(viewport={"width": 1024, "height": 768}, has_touch=True)
     touch_page = touch_context.new_page()
     touch_page.on("pageerror", lambda e: errors.append(str(e)))
@@ -382,9 +378,8 @@ with sync_playwright() as p:
     version_link(touch_page, "legacy.md").click()
     touch_action = touch_page.get_by_role("button", name="重新解析分块", exact=True)
     touch_action.tap()
-    checks["触屏首次点击仅展开"] = touch_page.get_by_role("dialog").count() == 0
-    touch_action.tap()
     touch_page.get_by_role("dialog").wait_for()
+    checks["触屏点一下直接执行"] = True
     touch_page.get_by_role("dialog").get_by_role("button", name="取消", exact=True).tap()
     touch_page.get_by_role("dialog").wait_for(state="detached")
     open_reparse(touch_page)

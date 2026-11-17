@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Check, Copy, Download, LoaderCircle, RotateCcw, Save, X } from "lucide-react"
 
-import { ExpandableActionBar, type ExpandableActionBarItem } from "@/components/motion/expandable-action-bar"
 import type { MorphButtonState } from "@/components/spectrumui/morph-button"
 import { copyToClipboardWithMeta } from "@/components/ui/copy-button"
+import { Button } from "@/components/ui/button"
+import { Hint, Keys } from "@/components/hint"
 import { toast } from "@/components/toaster"
 
 interface ResultActionsProps {
@@ -18,6 +19,7 @@ interface ResultActionsProps {
 const SAVE_LABELS = { idle: "保存到知识库", loading: "保存中", success: "已保存", error: "保存失败" }
 const SAVE_ICONS = { idle: Save, loading: LoaderCircle, success: Check, error: X }
 
+/** 结果工具栏：一排图标按钮，鼠标停留时显示说明，点击直接执行。 */
 export function ResultActions({ markdown, busy, saveState, onDownload, onSave, onReparse }: ResultActionsProps) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
@@ -31,26 +33,48 @@ export function ResultActions({ markdown, busy, saveState, onDownload, onSave, o
     else toast({ title: "复制失败", status: "error" })
   }
   const SaveIcon = SAVE_ICONS[saveState]
-  const items: ExpandableActionBarItem[] = [
-    { id: "copy", label: copied ? "已复制" : "复制 Markdown", icon: copied ? <Check /> : <Copy />, disabled: busy, onClick: copy },
-    { id: "download", label: "下载 .md", icon: <Download />, disabled: busy, onClick: onDownload },
-    {
-      id: "save", label: SAVE_LABELS[saveState],
-      icon: <SaveIcon className={saveState === "loading" ? "animate-spin" : undefined} />,
-      disabled: busy || saveState !== "idle", onClick: onSave,
-    },
-    { id: "reparse", label: busy ? "处理中" : "重新解析分块", icon: <RotateCcw className={busy ? "animate-spin" : undefined} />, disabled: busy || saveState === "loading", onClick: onReparse },
-  ]
 
   return (
-    <div aria-label="Markdown 产物操作" className="min-w-0 max-w-full" role="group">
-      <ExpandableActionBar
-        className="flex"
-        classNames={{ track: "h-9 p-0.5 shadow-xs", icon: "[&_svg]:size-3.5" }}
-        items={items}
-        size="sm"
+    <div aria-label="Markdown 产物操作" className="flex h-9 items-center gap-0.5 rounded-full border border-border bg-background p-0.5 shadow-xs" role="group">
+      <Action disabled={busy} icon={copied ? <Check /> : <Copy />} label={copied ? "已复制" : "复制 Markdown"} onClick={copy} />
+      <Action disabled={busy} icon={<Download />} label="下载 .md" onClick={onDownload} />
+      <Action
+        disabled={busy || saveState !== "idle"}
+        hint={saveState === "idle" ? <>保存到知识库 <Keys>Ctrl / ⌘ S</Keys></> : undefined}
+        icon={<SaveIcon className={saveState === "loading" ? "animate-spin" : undefined} />}
+        label={SAVE_LABELS[saveState]}
+        onClick={onSave}
+      />
+      <Action
+        disabled={busy || saveState === "loading"}
+        icon={<RotateCcw className={busy ? "animate-spin" : undefined} />}
+        label={busy ? "处理中" : "重新解析分块"}
+        onClick={onReparse}
       />
       <span aria-live="polite" className="sr-only">{copied ? "已复制" : saveState !== "idle" ? SAVE_LABELS[saveState] : ""}</span>
     </div>
+  )
+}
+
+function Action({ label, hint, icon, disabled, onClick }: {
+  label: string
+  hint?: ReactNode
+  icon: ReactNode
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Hint label={hint ?? label}>
+      <Button
+        aria-label={label}
+        className="rounded-full text-muted-foreground hover:text-foreground [&_svg]:size-3.5"
+        disabled={disabled}
+        onClick={onClick}
+        size="icon-sm"
+        variant="ghost"
+      >
+        {icon}
+      </Button>
+    </Hint>
   )
 }

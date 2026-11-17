@@ -293,7 +293,7 @@ function ResultView({ actions, importStatus, busy, result, markdown, separator, 
             value={tab}
             variant="Segmented"
           />
-          <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
+          <div className="ml-auto flex flex-1 items-center justify-end gap-2">
             {actions}
             {importStatus?.action}
           </div>

@@ -57,6 +57,8 @@ interface WorkspaceProps {
   /** 批量处理视图；打开时占据主区域 */
   batch: ReactNode | null
   onBatch: () => void
+  /** 删除左侧列表中的单个 PDF（打开确认） */
+  onDeletePath: (path: string) => void
   onSettings: () => void
   /** 当前版本在 FastGPT 中的导入状态与导入按钮 */
   importStatus: ReactNode
@@ -141,6 +143,7 @@ export function Workspace(props: WorkspaceProps) {
               onUpload={props.onUpload}
               onBatch={props.onBatch}
               batchOpen={!!props.batch}
+              onDelete={props.onDeletePath}
               project={project}
               uploading={props.uploading}
             />

@@ -19,6 +19,7 @@ import { FileDrawer, type FileDrawerView, type ParseSettings } from "@/component
 import { BatchStage } from "@/components/batch-stage"
 import { KbPicker } from "@/components/kb-picker"
 import { KbSettingsDrawer } from "@/components/kb-settings-drawer"
+import { DeleteFileDrawer } from "@/components/delete-confirm"
 import type { Pending } from "@/components/stage"
 import { Workspace, type Doc, type Preview } from "@/components/workspace"
 
@@ -132,6 +133,8 @@ export default function App() {
     batch?: { paths: string[]; skipConverted: boolean }
   } | null>(null)
   const [batchOpen, setBatchOpen] = useState(false)
+  // 左侧列表中点了删除的 PDF；seq 用作 key，每次打开重置确认框状态
+  const [deleting, setDeleting] = useState<{ path: string; open: boolean; seq: number } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSeq, setSettingsSeq] = useState(0)
   const [importing, setImporting] = useState(false)
@@ -779,6 +782,7 @@ export default function App() {
           ) : null}
           onSettings={openSettings}
           importStatus={importStatus}
+          onDeletePath={(path) => setDeleting((d) => ({ path, open: true, seq: (d?.seq ?? 0) + 1 }))}
           onBatch={() => {
             if (pending || busy) return
             setPreview(null)
@@ -830,15 +834,23 @@ export default function App() {
             ? startBatch(drawer.batch.paths, drawer.batch.skipConverted, settings)
             : drawer.reparse ? reparse(settings) : parse(drawer.path, settings)}
           onPreview={() => previewPath(drawer.path)}
-          onDelete={drawer.batch || drawer.reparse ? undefined : async (withFastgpt) => {
-            if ((await removeFiles([drawer.path], withFastgpt)).length) closeDrawer()
-          }}
-          imported={!!project.fastgpt.dataset && !!project.fastgpt.imports[drawer.path]}
-          dataset={project.fastgpt.dataset?.name}
           open={drawer.open}
           path={drawer.path}
           reparse={drawer.reparse}
           settings={drawer.reparse ? { convert: usedConvert ?? convertOpts, chunk: applied } : { convert: convertOpts, chunk: draft }}
+        />
+      )}
+      {project && deleting && (
+        <DeleteFileDrawer
+          dataset={project.fastgpt.dataset?.name}
+          imported={!!project.fastgpt.dataset && !!project.fastgpt.imports[deleting.path]}
+          key={deleting.seq}
+          onClose={() => setDeleting((d) => d && { ...d, open: false })}
+          onConfirm={async (withFastgpt) => {
+            if ((await removeFiles([deleting.path], withFastgpt)).length) setDeleting((d) => d && { ...d, open: false })
+          }}
+          open={deleting.open}
+          path={deleting.path}
         />
       )}
       {project && (

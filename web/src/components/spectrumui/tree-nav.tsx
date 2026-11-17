@@ -29,6 +29,8 @@ export interface TreeNavProps {
   /** Element used for links, e.g. Next's Link. Defaults to a plain anchor. */
   linkComponent?: LinkComponent;
   onSelect?: (item: TreeNavItem, event: React.MouseEvent<HTMLAnchorElement>) => void;
+  /** Row action (e.g. a delete button) shown at the row's end on hover or keyboard focus; kept outside the link. */
+  renderAction?: (item: TreeNavItem) => React.ReactNode;
   className?: string;
 }
 
@@ -49,6 +51,7 @@ export function TreeNav({
   followHover = true,
   linkComponent: Link = 'a',
   onSelect,
+  renderAction,
   className,
 }: TreeNavProps) {
   const listRef = React.useRef<HTMLUListElement>(null);
@@ -179,13 +182,14 @@ export function TreeNav({
 
       {items.map((item, index) => {
         const isActive = index === activeIndex;
+        const action = renderAction?.(item);
         return (
           <li
             key={item.href}
             ref={(el) => {
               rowRefs.current[index] = el;
             }}
-            className="relative"
+            className="group/row relative"
             onPointerEnter={() => enter(index)}
           >
             <Link
@@ -201,6 +205,7 @@ export function TreeNav({
                 // Before the first measurement the pill has no position yet, so
                 // the active row paints its own background for that one frame.
                 isActive && !measured && 'bg-black/4 dark:bg-white/6',
+                action && 'pe-9',
                 isActive
                   ? 'font-medium text-neutral-900 dark:text-neutral-100'
                   : 'font-normal text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100',
@@ -214,6 +219,11 @@ export function TreeNav({
                 </span>
               )}
             </Link>
+            {action && (
+              <span className="absolute inset-y-0 end-1 flex items-center opacity-0 transition-opacity group-focus-within/row:opacity-100 group-hover/row:opacity-100 [@media(hover:none)]:opacity-100">
+                {action}
+              </span>
+            )}
           </li>
         );
       })}

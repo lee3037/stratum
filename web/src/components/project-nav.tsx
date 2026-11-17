@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react"
-import { FilePlus2, FolderUp, ListChecks, RefreshCw, Search, X } from "lucide-react"
+import { FilePlus2, FolderUp, ListChecks, RefreshCw, Search, Trash2, X } from "lucide-react"
 
 import type { Project, UploadItem } from "@/lib/library"
 import { itemsFromInput } from "@/lib/library"
@@ -21,10 +21,12 @@ interface ProjectNavProps {
   /** 打开批量处理视图 */
   onBatch: () => void
   batchOpen: boolean
+  /** 删除单个 PDF（打开确认） */
+  onDelete: (path: string) => void
 }
 
 /** 左栏上半部分：知识库中的全部 PDF。 */
-export function ProjectNav({ project, active, locked, uploading, onSelect, onRefresh, onUpload, onBatch, batchOpen }: ProjectNavProps) {
+export function ProjectNav({ project, active, locked, uploading, onSelect, onRefresh, onUpload, onBatch, batchOpen, onDelete }: ProjectNavProps) {
   const filesRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState("")
   const q = query.trim().toLowerCase()
@@ -155,6 +157,18 @@ export function ProjectNav({ project, active, locked, uploading, onSelect, onRef
               e.preventDefault()
               onSelect(item.label)
             }}
+            renderAction={(item) => project.active[item.label] ? null : (
+              <Hint label="删除">
+                <button
+                  aria-label={`删除 ${item.label}`}
+                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                  onClick={() => onDelete(item.label)}
+                  type="button"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </Hint>
+            )}
           />
         ) : (
           <p className="px-3 py-2 text-sm text-muted-foreground">

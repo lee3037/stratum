@@ -116,10 +116,10 @@ def normalize_table(raw_rows, ocr: bool = False, col_x: list | None = None,
 def split_sections(raw_rows, hspan, col_x: list | None = None, ocr: bool = False) -> list[dict]:
     """一个框线表格内用通栏标题行（一个单元格横跨整行）隔开的几张小表，拆开分别处理。
 
-    返回 [{"title", "rows", "col_x"}]：title 为该段之前的通栏标题（多行用 · 连接，可能为空），
+    返回 [{"title", "rows", "col_x", "hspan"}]：title 为该段之前的通栏标题（多行用 · 连接，可能为空），
     rows 只保留该段真正用到的列——在该段每一行都被横向覆盖的列，是其他小表的列边界带来的。"""
     if not raw_rows or not hspan or len(hspan) != len(raw_rows):
-        return [{"title": "", "rows": raw_rows, "col_x": col_x}]
+        return [{"title": "", "rows": raw_rows, "col_x": col_x, "hspan": None}]
     width = len(raw_rows[0])
 
     def full_width(i):
@@ -147,8 +147,90 @@ def split_sections(raw_rows, hspan, col_x: list | None = None, ocr: bool = False
             "title": " · ".join(t for t in titles if t),
             "rows": [[r[j] for j in keep] for r in rows],
             "col_x": [col_x[j] for j in keep] if col_x and len(col_x) == width else None,
+            "hspan": [[h[j] for j in keep] for h in spans],
         })
     return out
+
+
+FORM_LABEL_MAX = 12  # 字段名的最大字数
+
+
+def form_fields(raw_rows, hspan=None, ocr: bool = False, continued: bool = False) -> list[tuple[str, list[str]]] | None:
+    """表单式表格 → [(字段名, 内容各段)]；不是表单时返回 None。
+
+    表单式表格：左列是字段名，右侧是该字段的内容，内容多为横跨整行的合并单元格（如维修标准卡片）。
+    按普通数据表处理会把第一行当表头、把合并单元格的内容复制到每一列。
+    - 字段名为空的行是上一字段的延续（纵向合并，或跨页续表的第一行）；
+    - 一行里有多个单元格时（“修理等级 | □一般 | 建议配工 | 视情”），第一格属于该字段，其余两两成对；
+    - continued：上一页以表单结尾，这张表是它的续表，两列时不再要求内容是成段文字。"""
+    if not raw_rows or len(raw_rows) < 2:
+        return None
+    width = len(raw_rows[0])
+    spans = hspan if hspan and len(hspan) == len(raw_rows) else None
+    if width < 2 or (width > 2 and spans is None):
+        return None
+    rows = []
+    for i, r in enumerate(raw_rows):
+        # 被左侧单元格横向覆盖的格是合并单元格的副本，丢弃
+        cells = [r[j] if j < len(r) else None for j in range(width) if not (spans and spans[i][j])]
+        label = _clean_cell(cells[0], ocr)
+        values = [str(c) for c in cells[1:] if c is not None and _clean_cell(c, ocr)]
+        rows.append((label, values))
+    labels = [l for l, _ in rows if l]
+    if len(labels) < 2 or any(len(l) > FORM_LABEL_MAX or not re.search(r"[\u4e00-\u9fffA-Za-z]", l) for l in labels):
+        return None
+    if width > 2:
+        single = sum(1 for _, v in rows if len(v) <= 1)
+        if single < 0.6 * len(rows):
+            return None
+    elif not continued:
+        # 两列表格：内容是成段文字（而非“参数 | 数值”这类短值）才按表单处理
+        vals = [v[0] for _, v in rows if v]
+        if not vals or not any("\n" in v.strip() for v in vals):
+            return None
+        mean_val = sum(len(_clean_cell(v, ocr)) for v in vals) / len(vals)
+        if mean_val < 3 * sum(len(l) for l in labels) / len(labels):
+            return None
+    # 字段名垂直居中在几行之间（上下各有同样多的空行）：开头的空行也属于这个字段，而不是上一页的续行
+    lead = next(i for i, (l, _) in enumerate(rows) if l)
+    if 0 < lead and len(rows) > 2 * lead and not any(l for l, _ in rows[lead + 1:2 * lead + 1]):
+        label = rows[lead][0]
+        rows = [(label, rows[0][1])] + [("", v) for _, v in rows[1:lead + 1]] + rows[lead + 1:]
+    # 整行内容的最长行，用来判断哪些行是提前换行（段落结束）
+    full = max((len(_clean_cell(p, ocr)) for _, v in rows if len(v) == 1 for p in v[0].split("\n")), default=0)
+    fields: list[tuple[str, list[str]]] = []
+    for label, values in rows:
+        if len(values) == 1:
+            parts = _cell_paragraphs(values[0], full, ocr)
+        elif values:
+            vs = [_clean_cell(v, ocr) for v in values]
+            head, rest = (vs[0], vs[1:]) if len(vs) % 2 else ("", vs)
+            pairs = [f"{rest[k]}：{rest[k + 1]}" for k in range(0, len(rest), 2)]
+            parts = ["；".join(p for p in [head, *pairs] if p)]
+        else:
+            parts = []
+        if not label and fields:
+            fields[-1][1].extend(parts)
+        elif label or parts:
+            fields.append((label, parts))
+    return fields
+
+
+def _cell_paragraphs(value: str, full: int, ocr: bool) -> list[str]:
+    """把单元格文字按段落拆开：编号开头、冒号结尾的小标题、上一行以冒号结尾或明显没写满（提前换行）时另起一段。"""
+    from .structure import _list_marker
+
+    lines = [t for t in (clean_text(p, ocr) for p in str(value).split("\n")) if t]
+    paras: list[list[str]] = []
+    for line in lines:
+        prev = paras[-1][-1] if paras else None
+        subtitle = line.endswith(("：", ":")) and 4 <= len(line) <= 16  # “验收方法及标准：”这类小标题
+        if (prev is None or subtitle or _list_marker(line) or prev.endswith(("：", ":"))
+                or (full >= 20 and len(prev) < 0.6 * full)):
+            paras.append([line])
+        else:
+            paras[-1].append(line)
+    return [join_lines(p) for p in paras]
 
 
 _CJK_CHAR = re.compile(r"^[\u4e00-\u9fff]$")

@@ -93,7 +93,76 @@ def test_table_sections_split_on_full_width_rows():
     assert secs[0]["rows"] == [["机构", "部位", "周期"], ["起升", "减速箱", "60"]] and secs[0]["col_x"] == [10, 20, 40]
     assert secs[1]["rows"][0] == ["机构", "名称", "数量", "周期"]
     # 没有横向覆盖信息（版面识别的表格）：原样返回
-    assert T.split_sections(rows, None) == [{"title": "", "rows": rows, "col_x": None}]
+    assert T.split_sections(rows, None) == [{"title": "", "rows": rows, "col_x": None, "hspan": None}]
+
+
+def _form_page(number, rows, hspan, extra=()):
+    boxes = [{"cls": "table", "bbox": [64, 100, 532, 700], "lines": [], "max_fontsize": 10.5,
+              "table": {"rows": rows, "source": "lines", "col_x": [64, 150, 300, 360, 420, 475][:len(rows[0])],
+                        "hspan": hspan}}]
+    for k, (y, text) in enumerate(extra):
+        boxes.append({"cls": "text", "bbox": [90, y, 400, y + 12], "max_fontsize": 10.5, "table": None,
+                      "lines": [{"text": text, "bbox": [90, y, 400, y + 12], "size": 10.5, "bold": False,
+                                 "lead_bold": False, "font": "SimSun"}]})
+    return {"number": number, "width": 595, "height": 842, "ocr": False, "dropped_invisible": False, "boxes": boxes}
+
+
+def test_form_table_as_fields():
+    from app.structure import build_elements
+
+    F, S = False, True
+    span = [F, F, S, S, S, S]
+    tech = ("技术要求与标准：\n1、在修理过程中使用焊接、气割而使原漆层破坏的金属表面均需进行防腐修\n理。\n"
+            "2、施工方法：油漆涂刷时，应按底漆——中漆——面漆的涂刷顺序进行施工，油\n漆至少要两底、两面（以不粘手为")
+    rows1 = [
+        ["适用范围", *["通用修理项目"] * 5],
+        ["修理等级", "□一般  √比较重要  □重要", "建议配工", "视情", "修理工期", "视情"],
+        ["工属具配备", *["角向磨光机、钢丝刷"] * 5],
+        ["项目安全控制点", *["1、施工现场及材料防火；\n2、打磨过程中戴上护目镜，防止飞溅物伤害眼睛；"] * 5],
+        ["具体修理规范与\n技术要求", *[tech] * 5],
+    ]
+    page1 = _form_page(1, rows1, [span, [F] * 6, span, span, span])
+    # 续表：第一行没有字段名，接回上一页最后一段；之后下一页开头的图题不能并进「附件」
+    rows2 = [["", "准）。大面积部位应优先采用滚涂的方法。\n3、油漆表面色泽应均匀一致。"],
+             ["项目验收", "验收人员：设备点检员\n验收方法及标准：\n按照技术要求与标准进行验收。"],
+             ["附  件", "电动液压推杆制动器结构示意图"]]
+    page2 = _form_page(2, rows2, [[F, F]] * 3)
+    page3 = {"number": 3, "width": 595, "height": 842, "ocr": False, "dropped_invisible": False,
+             "boxes": _form_page(3, [["x"]], None, [(80, "附件：电动液压推杆制动器结构示意图")])["boxes"][1:]}
+    els, _stats = build_elements([page1, page2, page3])
+    md = to_markdown(els, ChunkOptions(max_chars=4000))["markdown"]
+    assert "通用修理项目 |" not in md and "|" not in md  # 不再按数据表输出、不复制合并单元格
+    assert "**适用范围**：通用修理项目" in md
+    assert "**修理等级**：□一般 √比较重要 □重要；建议配工：视情；修理工期：视情" in md
+    assert "**项目安全控制点**：\n\n1. 施工现场及材料防火；\n2. 打磨过程中戴上护目镜" in md
+    assert "技术要求与标准：\n\n1. 在修理过程中使用焊接、气割而使原漆层破坏的金属表面均需进行防腐修理。" in md
+    assert "两底、两面（以不粘手为准）。大面积部位应优先采用滚涂的方法。\n3. 油漆表面色泽应均匀一致。" in md
+    assert "验收人员：设备点检员\n\n验收方法及标准：\n\n按照技术要求与标准进行验收。" in md
+    assert "**附件**：电动液压推杆制动器结构示意图\n\n附件：电动液压推杆制动器结构示意图" in md
+
+
+def test_form_detection_leaves_data_tables():
+    F, S = False, True
+    # 普通数据表：两列短值、或各行多格并列，不按表单处理
+    assert T.form_fields([["参数", "数值"], ["额定起重量", "25t"], ["跨度", "30m"]], [[F, F]] * 3) is None
+    rows = [["机构", "部位", "周期"], ["起升", "减速箱", "60"], ["变幅", "减速箱", "48"]]
+    assert T.form_fields(rows, [[F, F, F]] * 3) is None
+    assert T.form_fields(rows, None) is None  # 没有合并单元格信息的多列表格
+
+
+def test_form_continuation_with_centered_label():
+    F = False
+    # 续表：内容都是短句，只有上一页以表单结尾时才按表单处理
+    rows = [["", "验收人：设备点检员"], ["项目验收", "验收方法及标准："], ["", "按技术要求和标准进行验收。"],
+            ["技术支持", "无"], ["附  件", "无"]]
+    assert T.form_fields(rows, [[F, F]] * 5) is None
+    fields = T.form_fields(rows, [[F, F]] * 5, continued=True)
+    # 「项目验收」在三行中间垂直居中：上方的空行也属于它
+    assert fields == [("项目验收", ["验收人：设备点检员", "验收方法及标准：", "按技术要求和标准进行验收。"]),
+                      ("技术支持", ["无"]), ("附件", ["无"])]
+    # 上一页最后一个字段的续行（下面没有对称的空行）仍接回上一页
+    rows = [["", "准）。大面积部位应优先采用滚涂的方法。"], ["项目验收", "验收人员：设备点检员"], ["附  件", "无"]]
+    assert T.form_fields(rows, [[F, F]] * 3, continued=True)[0] == ("", ["准）。大面积部位应优先采用滚涂的方法。"])
 
 
 def test_header_cut_by_page_break_is_joined():

@@ -494,11 +494,47 @@ def _blocks_to_elements(blocks, style: BodyStyle, toc_keys, stats):
             elements.extend(flow.build())
         flow = None
 
+    def emit_form(fields, base):
+        """表单式表格逐字段输出：「**字段名**：内容」；内容有多段时字段名单独一行，各段（编号的为列表项）依次跟在后面。
+        字段名为空（跨页续表的第一行）时直接输出内容，由跨页合并接回上一页的最后一段；
+        其余字段内容不与其他页的文字合并（form 标记）。"""
+        page = base["pages"][0]
+
+        def numbered(text):
+            m = _list_marker(text)
+            return bool(m) and m[0] != "-"  # □、√ 等复选框不是列表符号
+
+        for label, parts in fields:
+            mark = {"form": "field" if label else "cont"}
+            name = f"**{label}**：" if label else ""
+            if len(parts) == 1 and not numbered(parts[0]):
+                elements.append({"type": "paragraph", "text": name + parts[0], "role": None, **base, **mark})
+                continue
+            if name:
+                elements.append({"type": "paragraph", "text": name, "role": None, **base, **mark})
+            for k, p in enumerate(parts):
+                m = mark if k == 0 else {"form": "field"}
+                if numbered(p):
+                    elements.append({**_make_list_item(p, page, base["bbox"], None, base["ph"]),
+                                     "pw": base["pw"], "ocr": base["ocr"], **m})
+                else:
+                    elements.append({"type": "paragraph", "text": p, "role": None, **base, **m})
+
     def emit_table(b, tab, base):
         page, raw = b["page"], tab.get("rows")
         # 框线表格内的通栏标题行把它分成几张小表：标题作为表名，各表只保留自己的列
         sections = T.split_sections(raw, tab.get("hspan"), tab.get("col_x"), b["ocr"])
         for k, sec in enumerate(sections):
+            # 上一页（或同页前面）刚以表单结尾：这张表可能是它的续表
+            continued = k == 0 and bool(elements) and bool(elements[-1].get("form")) and \
+                page - 1 <= elements[-1]["pages"][1] <= page
+            form = T.form_fields(sec["rows"], sec.get("hspan"), b["ocr"], continued)
+            if form:
+                if sec["title"]:
+                    elements.append({"type": "paragraph", "text": sec["title"], "role": None, **base})
+                emit_form(form, base)
+                stats["tables"] += 1
+                continue
             # 拆出的最后一张小表只剩表头：多半是表头被分页截断，保留为只有表头的表格，与下一页的续表合并
             header_only = len(sections) > 1 and k == len(sections) - 1 and len(sec["rows"]) == 1
             t = T.normalize_table(sec["rows"], b["ocr"], sec["col_x"], min_rows=1 if header_only else 2) if sec["rows"] else None
@@ -573,6 +609,9 @@ def _is_continuation(prev, nxt) -> bool:
     if prev["type"] not in ("paragraph", "list_item") or nxt["type"] != "paragraph":
         return False
     if prev.get("role") or nxt.get("role"):
+        return False
+    # 表单字段只接跨页续表中没有字段名的那一行
+    if (prev.get("form") or nxt.get("form")) and nxt.get("form") != "cont":
         return False
     if ends_sentence(prev["text"]) or len(prev["text"]) < 15:
         return False
